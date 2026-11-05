@@ -83,6 +83,9 @@ TOPIC_END_HOUR = int(os.getenv("TOPIC_END_HOUR", "23"))
 # 只 @ 最近这么多天里发过言的人（死人不 @）
 TOPIC_ACTIVE_DAYS = float(os.getenv("TOPIC_ACTIVE_DAYS", "7"))
 
+# 对话延续：刚跟某人聊过，这段时间内他再说就不用重新 @
+FOLLOW_UP_SECONDS = float(os.getenv("FOLLOW_UP_SECONDS", "180"))
+
 
 def log(*parts):
     """带时间戳打日志，方便回头看什么时候发生了什么。"""
@@ -574,10 +577,12 @@ async def maybe_chime_in(history, state, group_id):
     if not os.getenv("OPENAI_API_KEY"):
         return None
     if not auto_allowed(state, group_id):
+        log("  [自主] 被粗筛挡掉（冷清/冷却/配额/概率）")
         return None
 
     recent = list(history)[-6:]
     if len(recent) < 2:
+        log("  [自主] 上下文太少（只有 %d 条）" % len(recent))
         return None
 
     lines = "\n".join("%s: %s" % (h["nick"], h["text"]) for h in recent)
@@ -720,8 +725,19 @@ async def handle_event(ws, event, state):
     state["msg_times"].setdefault(group_id, []).append(time.time())
     record_speaker(group_id, user_id, nickname)
 
-    # ---- 路径 A：被叫了，正经回 ----
-    if should_reply(event, text, self_id):
+    # ---- 路径 A0：刚跟这人聊过，他接着说就继续接 ----
+    last_user = state["last_reply_user"].get(group_id)
+    following = (
+        last_user
+        and user_id is not None
+        and last_user[0] == user_id
+        and time.time() - last_user[1] < FOLLOW_UP_SECONDS
+    )
+
+    log("[消息] %s: %s" % (nickname, display[:40]))
+
+    # ---- 路径 A：被叫了，或者刚聊过在延续，正经回 ----
+    if should_reply(event, text, self_id) or following:
         last = state["last_reply"].get(group_id, 0)
         if time.time() - last < COOLDOWN:
             log("[跳过] 冷却中，%.1f 秒后再说话" % (COOLDOWN - (time.time() - last)))
@@ -748,6 +764,7 @@ async def handle_event(ws, event, state):
         log("[回复]", reply, ("+ 表情包 x%d" % len(memes_out)) if memes_out else "")
         await send_group(ws, group_id, reply or "", memes_out)
         history.append({"nick": BOT_NICK, "text": reply})
+        state["last_reply_user"][group_id] = (user_id, time.time())
         return
 
     # ---- 路径 B：没叫它，看心情插不插话 ----
@@ -808,7 +825,8 @@ async def run_bot():
     state = {"history": {}, "last_reply": {}, "last_auto": {},
              "auto_times": {}, "msg_times": {},
              "topic_today": 0, "topic_day": "", "topic_last_user": {},
-             "topic_group": None, "self_id": None}
+             "topic_group": None, "self_id": None,
+             "last_reply_user": {}}
     while True:
         try:
             print("连接", WS_URL, "...")
