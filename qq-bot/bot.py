@@ -76,9 +76,11 @@ async def ask_model(history, text, nickname):
     client = AsyncOpenAI(base_url=os.getenv("OPENAI_BASE_URL") or None)
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     for item in history:
-        # 自己说过的话用 assistant 角色，模型才知道那是"我"说的，不会重复
-        role = "assistant" if item["nick"] == BOT_NICK else "user"
-        messages.append({"role": role, "content": "%s: %s" % (item["nick"], item["text"])})
+        # 自己说过的话用 assistant 角色，且不带昵称前缀，否则模型会模仿出「大肥鱼：…」
+        if item["nick"] == BOT_NICK:
+            messages.append({"role": "assistant", "content": item["text"]})
+        else:
+            messages.append({"role": "user", "content": "%s: %s" % (item["nick"], item["text"])})
     messages.append({
         "role": "user",
         "content": "%s: %s\n（以群友身份回一句，最多 40 字，别解释）" % (nickname, text),
