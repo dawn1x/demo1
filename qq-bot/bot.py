@@ -174,9 +174,14 @@ async def call_api(action, params, timeout=20):
     """
     import websockets
 
+    kwargs = WS_KWARGS
+    if not kwargs and WS_TOKEN:           # 兜底：没继承连接参数时自己带 token
+        kwargs = {"additional_headers": {"Authorization": "Bearer " + WS_TOKEN},
+                  "max_size": 2 ** 24}
+
     echo = "tool-" + str(random.randint(1, 10 ** 9))
     try:
-        async with websockets.connect(WS_URL, **WS_KWARGS) as conn:
+        async with websockets.connect(WS_URL, **kwargs) as conn:
             await conn.send(json.dumps({"action": action, "params": params, "echo": echo}))
             while True:
                 raw = await asyncio.wait_for(conn.recv(), timeout=timeout)
