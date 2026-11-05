@@ -74,11 +74,8 @@ def _rank(url):
     return score
 
 
-def get_meme(query, tries=5):
-    """现搜一张表情包。返回 (图片字节, 来源URL)；搜不到返回 (None, None)。"""
-    query = (query or "").strip()
-    if not query:
-        return None, None
+def _try(query, tries):
+    """按一个查询词试一轮，拿到就返回。"""
     if "表情包" not in query and "表情" not in query:
         query = query + " 表情包"
 
@@ -94,6 +91,35 @@ def get_meme(query, tries=5):
         if not (MIN_BYTES <= len(data) <= MAX_BYTES):
             continue
         return data, u
+    return None, None
+
+
+def get_meme(query, tries=4):
+    """现搜一张表情包。返回 (图片字节, 来源URL)；搜不到返回 (None, None)。
+
+    查询词太长往往搜不到（"无语 翻白眼 嘲讽"），所以逐级退化成更短的词再试。
+    """
+    query = (query or "").strip()
+    if not query:
+        return None, None
+
+    # 候选：完整词 -> 前两个词 -> 第一个词 -> 兜底
+    words = query.replace(",", " ").replace("、", " ").split()
+    cands = [query]
+    if len(words) > 2:
+        cands.append(" ".join(words[:2]))
+    if len(words) > 1:
+        cands.append(words[0])
+    cands.append("无语")
+
+    seen = set()
+    for cand in cands:
+        if cand in seen:
+            continue
+        seen.add(cand)
+        data, src = _try(cand, tries)
+        if data:
+            return data, src
     return None, None
 
 

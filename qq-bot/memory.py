@@ -48,6 +48,22 @@ def _key(nick, user_id=None):
     return (nick or "某人").strip()
 
 
+def _find(data, nick, user_id=None):
+    """找一个人的记录。user_id 找不到就按昵称找，再找不到就扫一遍。
+
+    这样「存的时候有 user_id、查的时候只有昵称」也能对上。
+    """
+    users = data.get("users", {})
+    if user_id and str(user_id) in users:
+        return users[str(user_id)]
+    if nick in users:
+        return users[nick]
+    for item in users.values():
+        if item.get("nick") == nick:
+            return item
+    return None
+
+
 def remember(nick, content, kind="fact", user_id=None):
     """记一件事。kind: grudge / praise / fact。"""
     if kind not in KINDS:
@@ -76,7 +92,7 @@ def recall(nick, user_id=None, limit=5):
     """把某个人的记录翻出来。"""
     with _lock:
         data = load()
-        u = data["users"].get(_key(nick, user_id))
+        u = _find(data, nick, user_id)
     if not u or not u.get("items"):
         return "没有关于 %s 的记录" % nick
     lines = []
@@ -89,7 +105,7 @@ def profile(nick, user_id=None, limit=4):
     """给提示词用的一小段人物画像，没有就返回空串。"""
     with _lock:
         data = load()
-        u = data["users"].get(_key(nick, user_id))
+        u = _find(data, nick, user_id)
     if not u or not u.get("items"):
         return ""
     items = u["items"][-limit:]
@@ -104,7 +120,7 @@ def profile(nick, user_id=None, limit=4):
 def grudge_count(nick, user_id=None):
     with _lock:
         data = load()
-        u = data["users"].get(_key(nick, user_id))
+        u = _find(data, nick, user_id)
     if not u:
         return 0
     return sum(1 for i in u.get("items", []) if i.get("kind") == "grudge")

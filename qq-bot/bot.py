@@ -72,6 +72,11 @@ AUTO_ALIVE_WINDOW = float(os.getenv("AUTO_ALIVE_WINDOW", "180"))  # 多久内有
 AUTO_ALIVE_MIN = int(os.getenv("AUTO_ALIVE_MIN", "2"))
 
 
+def log(*parts):
+    """带时间戳打日志，方便回头看什么时候发生了什么。"""
+    print(time.strftime("%H:%M:%S"), *parts, flush=True)
+
+
 # ---------------------------------------------------------------- 工具
 # 记忆类的工具跟 memory.py 绑定，所以写在这里
 MEMORY_TOOLS = [
@@ -285,7 +290,7 @@ async def ask_model(history, text, nickname, user_id=None):
             except ValueError:
                 args = {}
             result = await run_any_tool(call.function.name, args, images)
-            print("    [工具] %s(%s) -> %s" % (call.function.name, args, result[:80]))
+            log("  [工具] %s(%s) -> %s" % (call.function.name, args, result[:80]))
             messages.append({
                 "role": "tool",
                 "tool_call_id": call.id,
@@ -340,11 +345,13 @@ def auto_allowed(state, group_id):
 
 async def maybe_chime_in(history, state, group_id):
     """让模型看一眼最近的聊天，决定要不要自己插话。"""
-    if not os.getenv("OPENAI_API_KEY") or not auto_allowed(state, group_id):
+    if not os.getenv("OPENAI_API_KEY"):
+        return None
+    if not auto_allowed(state, group_id):
         return None
 
     recent = list(history)[-6:]
-    if len(recent) < 3:
+    if len(recent) < 2:
         return None
 
     lines = "\n".join("%s: %s" % (h["nick"], h["text"]) for h in recent)
@@ -364,6 +371,7 @@ async def maybe_chime_in(history, state, group_id):
         return None
 
     if not data.get("speak"):
+        log("  [自主] 模型决定不插")
         return None
     reply = (data.get("reply") or "").strip()[:MAX_REPLY_LEN]
     if not reply:
@@ -427,11 +435,11 @@ async def handle_event(ws, event, state):
     if should_reply(event, text, self_id):
         last = state["last_reply"].get(group_id, 0)
         if time.time() - last < COOLDOWN:
-            print("[跳过] 冷却中，%.1f 秒后再说话" % (COOLDOWN - (time.time() - last)))
+            log("[跳过] 冷却中，%.1f 秒后再说话" % (COOLDOWN - (time.time() - last)))
             return
         state["last_reply"][group_id] = time.time()
 
-        print("[收到] 群 %s | %s: %s" % (group_id, nickname, text))
+        log("[收到] %s: %s" % (nickname, text))
         try:
             reply, images = await ask_model(list(history)[:-1], text, nickname, user_id)
         except Exception as exc:
@@ -439,7 +447,7 @@ async def handle_event(ws, event, state):
             return
         if not reply and not images:
             return
-        print("[回复]", reply, ("+ 表情包 x%d" % len(images)) if images else "")
+        log("[回复]", reply, ("+ 表情包 x%d" % len(images)) if images else "")
         await send_group(ws, group_id, reply or "", images)
         history.append({"nick": BOT_NICK, "text": reply})
         return
@@ -451,7 +459,7 @@ async def handle_event(ws, event, state):
         print("[自主判断出错]", exc)
         return
     if reply:
-        print("[自主插话] 回应 %s: %s -> %s" % (nickname, text, reply))
+        log("[自主插话] -> %s" % reply)
         await send_group(ws, group_id, reply)
         history.append({"nick": BOT_NICK, "text": reply})
 
