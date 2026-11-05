@@ -88,6 +88,8 @@ Q: 你这也太离谱了吧
 > 另外 NapCat 还有个 `create_collection`（收藏夹），但它的 `picList` 写死为空，只能存文本，图片走不通。
 > 图片要走的是上面这个「收藏表情」接口。
 
+### 记忆
+
 记忆存在 `data/memory.json`，结构：
 
 ```json
