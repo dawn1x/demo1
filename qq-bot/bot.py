@@ -23,6 +23,7 @@ from collections import deque
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+import memes
 import memory
 from persona import SYSTEM_PROMPT
 from tools import TOOL_SCHEMAS, run_tool
@@ -51,7 +52,7 @@ NAMES = [n.strip() for n in os.getenv("BOT_NAMES", "肥鱼,大肥鱼").split(","
 BOT_NICK = "大肥鱼"
 COOLDOWN = float(os.getenv("COOLDOWN", "3"))
 MAX_HISTORY = 20
-MAX_REPLY_LEN = 120
+MAX_REPLY_LEN = 200
 
 USE_TOOLS = os.getenv("USE_TOOLS", "1") == "1"
 MAX_TOOL_STEPS = 3
@@ -98,15 +99,43 @@ MEMORY_TOOLS = [
     },
 ]
 
-ALL_TOOLS = TOOL_SCHEMAS + MEMORY_TOOLS
+MEME_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "send_meme",
+            "description": "发一张表情包。别每句都发，气氛到了、要表达情绪时才发。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tag": {
+                        "type": "string",
+                        "description": "情绪分类，可选：" + "、".join(memes.CATEGORIES.keys()),
+                    },
+                },
+                "required": ["tag"],
+            },
+        },
+    },
+]
+
+ALL_TOOLS = TOOL_SCHEMAS + MEMORY_TOOLS + MEME_TOOL
 
 
-def run_any_tool(name, args):
+def run_any_tool(name, args, images=None):
+    """执行工具。images 用来收集本次要发的表情包图片。"""
     if name == "remember":
         return memory.remember(args.get("nick", ""), args.get("content", ""),
-                              args.get("kind", "fact"))
+                               args.get("kind", "fact"))
     if name == "recall":
         return memory.recall(args.get("nick", ""))
+    if name == "send_meme":
+        data, cat = memes.pick(args.get("tag"))
+        if not data:
+            return "表情包库是空的，发不了"
+        if images is not None:
+            images.append(data)
+        return "已发一张【%s】的表情包" % cat
     return run_tool(name, args)
 
 
@@ -134,24 +163,25 @@ def _build_messages(history, text, nickname, user_id=None):
             messages.append({"role": "user", "content": "%s: %s" % (item["nick"], item["text"])})
     messages.append({
         "role": "user",
-        "content": "%s: %s\n（以群友身份回一句，最多 40 字，别解释。需要事实/天气/梗就先用工具查）"
+        "content": "%s: %s\n（以群友身份回一两句，最多 80 字，像真人聊天，别解释。需要事实/天气/梗就先用工具查；想配个表情包就调 send_meme）"
                    % (nickname, text),
     })
     return messages
 
 
 async def ask_model(history, text, nickname, user_id=None):
-    """调模型生成回复。开了工具就进入 agent 循环。"""
+    """调模型生成回复。返回 (文字, 要发的表情包图片列表)。"""
     if not os.getenv("OPENAI_API_KEY"):
-        return random.choice(CANNED)
+        return random.choice(CANNED), []
 
     client = _client()
     messages = _build_messages(history, text, nickname, user_id)
     tools = ALL_TOOLS if USE_TOOLS else None
     steps = MAX_TOOL_STEPS if USE_TOOLS else 1
+    images = []
 
     for _ in range(steps):
-        kwargs = {"model": MODEL, "messages": messages, "temperature": 0.9, "max_tokens": 200}
+        kwargs = {"model": MODEL, "messages": messages, "temperature": 0.9, "max_tokens": 300}
         if tools:
             kwargs["tools"] = tools
         resp = await client.chat.completions.create(**kwargs)
@@ -159,16 +189,16 @@ async def ask_model(history, text, nickname, user_id=None):
 
         tool_calls = getattr(msg, "tool_calls", None)
         if not tool_calls:
-            return (msg.content or "").strip()[:MAX_REPLY_LEN]
+            return (msg.content or "").strip()[:MAX_REPLY_LEN], images
 
-        # 有兴趣调工具：先把它的话放回历史，再逐个执行
+        # 想调工具：先把它的话放回历史，再逐个执行
         messages.append(msg.model_dump(exclude_none=True))
         for call in tool_calls:
             try:
                 args = json.loads(call.function.arguments or "{}")
             except ValueError:
                 args = {}
-            result = run_any_tool(call.function.name, args)
+            result = run_any_tool(call.function.name, args, images)
             print("    [工具] %s(%s) -> %s" % (call.function.name, args, result[:80]))
             messages.append({
                 "role": "tool",
@@ -178,8 +208,8 @@ async def ask_model(history, text, nickname, user_id=None):
 
     # 工具用完还没收敛，再要一次纯回答
     resp = await client.chat.completions.create(
-        model=MODEL, messages=messages, temperature=0.9, max_tokens=200)
-    return (resp.choices[0].message.content or "").strip()[:MAX_REPLY_LEN]
+        model=MODEL, messages=messages, temperature=0.9, max_tokens=300)
+    return (resp.choices[0].message.content or "").strip()[:MAX_REPLY_LEN], images
 
 
 # ---------------------------------------------------------------- 自主插话
@@ -265,10 +295,16 @@ def should_reply(event, text, self_id):
     return any(name in text for name in NAMES)
 
 
-async def send_group(ws, group_id, text):
+async def send_group(ws, group_id, text, images=None):
+    """发一句文字，可以顺带一张表情包（合成一条消息发出去）。"""
+    if images:
+        message = [{"type": "text", "data": {"text": text}}]
+        message.extend(memes.to_segment(img) for img in images[:1])
+    else:
+        message = text
     await ws.send(json.dumps({
         "action": "send_group_msg",
-        "params": {"group_id": group_id, "message": text},
+        "params": {"group_id": group_id, "message": message},
         "echo": "reply",
     }, ensure_ascii=False))
 
@@ -299,14 +335,14 @@ async def handle_event(ws, event, state):
 
         print("[收到] 群 %s | %s: %s" % (group_id, nickname, text))
         try:
-            reply = await ask_model(list(history)[:-1], text, nickname, user_id)
+            reply, images = await ask_model(list(history)[:-1], text, nickname, user_id)
         except Exception as exc:
             print("[模型出错]", exc)
             return
-        if not reply:
+        if not reply and not images:
             return
-        print("[回复]", reply)
-        await send_group(ws, group_id, reply)
+        print("[回复]", reply, ("+ 表情包 x%d" % len(images)) if images else "")
+        await send_group(ws, group_id, reply or "", images)
         history.append({"nick": BOT_NICK, "text": reply})
         return
 
@@ -341,11 +377,14 @@ async def run_fake():
             continue
         history.append({"nick": "你", "text": text, "uid": "self"})
         try:
-            reply = await ask_model(list(history)[:-1], text, "你", "self")
+            reply, images = await ask_model(list(history)[:-1], text, "你", "self")
         except Exception as exc:
             print("模型出错:", exc)
             continue
-        print("大肥鱼 >", reply, "\n")
+        print("大肥鱼 >", reply)
+        if images:
+            print("        [表情包] 发了 %d 张" % len(images))
+        print()
         history.append({"nick": BOT_NICK, "text": reply})
 
 

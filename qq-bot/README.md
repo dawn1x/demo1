@@ -35,14 +35,30 @@ python3 qq-bot/bot.py --fake
 
 **人设不满意改 `persona.py`**，那是唯一的"性格文件"。
 
-## 它会的三件事
+## 它会的五件事
 
 | 工具 | 数据来源 | 触发时机 |
 |---|---|---|
 | `get_weather` | wttr.in | 问天气、穿什么 |
 | `search_web` | 必应中国 | 问新闻、比分、需要核实的事 |
 | `lookup_slang` | 必应（多查询打分） | 遇到不懂的梗 |
+| `send_meme` | 本地图库 | 吐槽、装逼、破防的时候甩一张 |
 | `remember` / `recall` | 本地 JSON | 有人骂它、夸它、说自己是干啥的 |
+
+### 表情包
+
+图库在 `data/memes/<分类>/`，8 个分类：笑、无语、生气、赞、疑惑、怕、摸鱼、嘲讽。
+
+首次部署先抓一批图（会联网从必应图片搜索下载，之后纯本地）：
+
+```bash
+python3 -c "import sys; sys.path.insert(0,'qq-bot'); import memes; print(memes.build(per_cat=8))"
+```
+
+发图走 OneBot 的 base64 消息段，不依赖任何图床。模型自己决定发不发、发哪个分类——
+实测「今天上班累死了」会发【摸鱼】，「你也太菜了吧」会发【嘲讽】。
+
+想换图库：把图丢进对应文件夹即可，文件名随便，支持 jpg/png/gif/webp。
 
 记忆存在 `data/memory.json`，结构：
 
