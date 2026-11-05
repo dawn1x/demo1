@@ -60,7 +60,6 @@ MAX_TOOL_STEPS = 3
 AUTO_CHANCE = float(os.getenv("AUTO_CHANCE", "0"))      # 每条消息插话的概率，0 = 不插话
 AUTO_COOLDOWN = float(os.getenv("AUTO_COOLDOWN", "600"))  # 同群两次插话最短间隔（秒）
 AUTO_MAX_PER_HOUR = int(os.getenv("AUTO_MAX_PER_HOUR", "3"))
-MEME_LIVE = os.getenv("MEME_LIVE", "1") == "1"   # 1=现搜现发，0=只用本地图库
 
 
 # ---------------------------------------------------------------- 工具
@@ -132,13 +131,13 @@ def run_any_tool(name, args, images=None):
     if name == "recall":
         return memory.recall(args.get("nick", ""))
     if name == "send_meme":
-        query = args.get("query") or args.get("tag") or ""
-        data, desc = memes.get_meme(query, live=MEME_LIVE)
+        query = args.get("query") or ""
+        data, src = memes.get_meme(query)
         if not data:
-            return "没搜到合适的表情包，这次就不发了"
+            return "没搜到合适的表情包，这次先不发"
         if images is not None:
             images.append(data)
-        return "已发一张「%s」表情包" % (desc or query)
+        return "已发一张「%s」表情包" % query
     return run_tool(name, args)
 
 
