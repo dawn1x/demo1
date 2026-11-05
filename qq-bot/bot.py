@@ -67,11 +67,11 @@ WS_KWARGS = {}
 USE_TOOLS = os.getenv("USE_TOOLS", "1") == "1"
 MAX_TOOL_STEPS = 3
 
-AUTO_CHANCE = float(os.getenv("AUTO_CHANCE", "0.3"))     # 每条消息被考虑插话的概率，0 = 不插话
-AUTO_COOLDOWN = float(os.getenv("AUTO_COOLDOWN", "120"))  # 同群两次插话最短间隔（秒）
-AUTO_MAX_PER_HOUR = int(os.getenv("AUTO_MAX_PER_HOUR", "10"))
-AUTO_ALIVE_WINDOW = float(os.getenv("AUTO_ALIVE_WINDOW", "180"))  # 多久内有 2 条消息才算"在聊"
-AUTO_ALIVE_MIN = int(os.getenv("AUTO_ALIVE_MIN", "2"))
+AUTO_CHANCE = float(os.getenv("AUTO_CHANCE", "1.0"))     # 每条消息被考虑接话的概率，0 = 不接
+AUTO_COOLDOWN = float(os.getenv("AUTO_COOLDOWN", "15"))   # 两次接话最短间隔（秒）
+AUTO_MAX_PER_HOUR = int(os.getenv("AUTO_MAX_PER_HOUR", "80"))
+AUTO_ALIVE_WINDOW = float(os.getenv("AUTO_ALIVE_WINDOW", "600"))
+AUTO_ALIVE_MIN = int(os.getenv("AUTO_ALIVE_MIN", "1"))
 
 # 主动 @ 人开话题：频率低，默认 2~4 小时一次，每天最多 3 次，只在白天
 TOPIC_ENABLE = os.getenv("TOPIC_ENABLE", "1") == "1"
@@ -327,19 +327,25 @@ async def ask_model(history, text, nickname, user_id=None, image_urls=None):
 
 
 # ---------------------------------------------------------------- 自主插话
-AUTO_PROMPT = """你在看一个 QQ 群聊天。你是群友「大肥鱼」，贴吧老哥那套嘴脸。
+AUTO_PROMPT = """你在水一个 QQ 群。你是群友「大肥鱼」，贴吧暴躁老哥，嘴快、爱接话、爱损人。
 
-现在没人叫你。你判断一下：这时候插一句合适吗？
+现在没人 @ 你。你要判断：这句话你接不接？
 
-规则：
-- 只有一种情况必须闭嘴：别人在认真排查技术问题、处理正事。
-- 其余情况你都可以插：有人吐槽、有人发癫、有人装逼、有人自问自答、
-  群里在抖机灵、话题正热。这是水群，不是开会。
-- 插就插一句，最多 25 个字，别解释，别说"我觉得"。
-- 没人说话（上面只有一两条）就别硬插。
+默认接。群里水群就是这样，别人说一句，你搭一句。
+只有这几种情况不接：
+1. 别人在认真排查技术故障、处理正事（那就让他们弄，别打扰）
+2. 你刚说过话，还在同一个话题上重复
+3. 对方是纯操作指令或跟旁人私聊（"你把文件发我""我看看"）
 
-只输出一个 JSON，不要别的：
-{"speak": true 或 false, "reply": "要插的话写这里"}"""
+其余都接：吐槽、装逼、破防、开玩笑、问问题、发癫、玩梗、感慨、发图、纯表情。
+接的时候：
+- 一到两句，最多 60 字
+- 贴着他说的话回，别自说自话
+- 可以反问、可以损、可以阴阳
+- 别每句都用同一个口头禅
+
+只输出 JSON：
+{"speak": true 或 false, "reply": "要接的话写这里"}"""
 
 
 def group_is_alive(state, group_id):
@@ -581,8 +587,7 @@ async def maybe_chime_in(history, state, group_id):
         return None
 
     recent = list(history)[-6:]
-    if len(recent) < 2:
-        log("  [自主] 上下文太少（只有 %d 条）" % len(recent))
+    if not recent:
         return None
 
     lines = "\n".join("%s: %s" % (h["nick"], h["text"]) for h in recent)
