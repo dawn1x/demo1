@@ -22,3 +22,6 @@ venv/
 
 # 协议端数据
 qq-bot/napcat/
+
+# 记忆数据
+qq-bot/data/
