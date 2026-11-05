@@ -65,9 +65,11 @@ WS_KWARGS = {}
 USE_TOOLS = os.getenv("USE_TOOLS", "1") == "1"
 MAX_TOOL_STEPS = 3
 
-AUTO_CHANCE = float(os.getenv("AUTO_CHANCE", "0"))      # 每条消息插话的概率，0 = 不插话
-AUTO_COOLDOWN = float(os.getenv("AUTO_COOLDOWN", "600"))  # 同群两次插话最短间隔（秒）
-AUTO_MAX_PER_HOUR = int(os.getenv("AUTO_MAX_PER_HOUR", "3"))
+AUTO_CHANCE = float(os.getenv("AUTO_CHANCE", "0.3"))     # 每条消息被考虑插话的概率，0 = 不插话
+AUTO_COOLDOWN = float(os.getenv("AUTO_COOLDOWN", "120"))  # 同群两次插话最短间隔（秒）
+AUTO_MAX_PER_HOUR = int(os.getenv("AUTO_MAX_PER_HOUR", "10"))
+AUTO_ALIVE_WINDOW = float(os.getenv("AUTO_ALIVE_WINDOW", "180"))  # 多久内有 2 条消息才算"在聊"
+AUTO_ALIVE_MIN = int(os.getenv("AUTO_ALIVE_MIN", "2"))
 
 
 # ---------------------------------------------------------------- 工具
@@ -302,18 +304,29 @@ AUTO_PROMPT = """你在看一个 QQ 群聊天。你是群友「大肥鱼」，�
 现在没人叫你。你判断一下：这时候插一句合适吗？
 
 规则：
-- 别人在认真讨论正事、指名道姓聊天、或者聊天已经结束，就别插。
-- 有人抛了个能被吐槽的点、有人在感慨、有人问了个明显没人接的问题，可以插。
-- 插也只插一句，最多 25 个字，别解释，别说"我觉得"。
-- 拿不准就别插。
+- 只有一种情况必须闭嘴：别人在认真排查技术问题、处理正事。
+- 其余情况你都可以插：有人吐槽、有人发癫、有人装逼、有人自问自答、
+  群里在抖机灵、话题正热。这是水群，不是开会。
+- 插就插一句，最多 25 个字，别解释，别说"我觉得"。
+- 没人说话（上面只有一两条）就别硬插。
 
 只输出一个 JSON，不要别的：
 {"speak": true 或 false, "reply": "要插的话写这里"}"""
 
 
+def group_is_alive(state, group_id):
+    """最近一段时间里群里有几个人在说话？太冷清就不插。"""
+    now = time.time()
+    times = [t for t in state["msg_times"].get(group_id, []) if now - t < AUTO_ALIVE_WINDOW]
+    state["msg_times"][group_id] = times          # 顺手清掉旧的
+    return len(times) >= AUTO_ALIVE_MIN
+
+
 def auto_allowed(state, group_id):
-    """粗筛：概率 + 冷却 + 每小时上限。先过这层再问模型，省钱。"""
+    """粗筛：冷清判断 + 冷却 + 每小时上限 + 概率。先过这层再问模型，省钱。"""
     if AUTO_CHANCE <= 0:
+        return False
+    if not group_is_alive(state, group_id):
         return False
     now = time.time()
     if now - state["last_auto"].get(group_id, 0) < AUTO_COOLDOWN:
@@ -408,6 +421,7 @@ async def handle_event(ws, event, state):
 
     history = state["history"].setdefault(group_id, deque(maxlen=MAX_HISTORY))
     history.append({"nick": nickname, "text": text, "uid": user_id})
+    state["msg_times"].setdefault(group_id, []).append(time.time())
 
     # ---- 路径 A：被叫了，正经回 ----
     if should_reply(event, text, self_id):
@@ -485,7 +499,8 @@ async def run_bot():
         except TypeError:
             kwargs["extra_headers"] = headers
 
-    state = {"history": {}, "last_reply": {}, "last_auto": {}, "auto_times": {}}
+    state = {"history": {}, "last_reply": {}, "last_auto": {},
+             "auto_times": {}, "msg_times": {}}
     while True:
         try:
             print("连接", WS_URL, "...")
