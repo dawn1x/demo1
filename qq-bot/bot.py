@@ -73,6 +73,14 @@ AUTO_MAX_PER_HOUR = int(os.getenv("AUTO_MAX_PER_HOUR", "10"))
 AUTO_ALIVE_WINDOW = float(os.getenv("AUTO_ALIVE_WINDOW", "180"))  # 多久内有 2 条消息才算"在聊"
 AUTO_ALIVE_MIN = int(os.getenv("AUTO_ALIVE_MIN", "2"))
 
+# 主动 @ 人开话题：频率低，默认 2~4 小时一次，每天最多 3 次，只在白天
+TOPIC_ENABLE = os.getenv("TOPIC_ENABLE", "1") == "1"
+TOPIC_MIN_INTERVAL = float(os.getenv("TOPIC_MIN_INTERVAL", "7200"))    # 2 小时
+TOPIC_MAX_INTERVAL = float(os.getenv("TOPIC_MAX_INTERVAL", "14400"))   # 4 小时
+TOPIC_MAX_PER_DAY = int(os.getenv("TOPIC_MAX_PER_DAY", "3"))
+TOPIC_START_HOUR = int(os.getenv("TOPIC_START_HOUR", "9"))
+TOPIC_END_HOUR = int(os.getenv("TOPIC_END_HOUR", "23"))
+
 
 def log(*parts):
     """带时间戳打日志，方便回头看什么时候发生了什么。"""
@@ -353,6 +361,125 @@ def auto_allowed(state, group_id):
     return random.random() < AUTO_CHANCE
 
 
+TOPIC_PROMPT = """你是 QQ 群群友「大肥鱼」，贴吧暴躁老哥。
+
+现在群里没人说话，你要主动 @ 一个人，抛个话题把场子热起来。
+
+要求：
+- 就一句，最多 30 字
+- 像老哥随口找话茬，别像客服，别问"最近怎么样"这种空话
+- 可以拿他之前的事开涮、催他、阴阳他一句，或者抛个能接的话头
+- 不骂父母，不带脏字，不涉黄
+- 不要写 @ 和名字，直接写话
+
+只输出这句话，不要引号不要解释。"""
+
+
+def topic_allowed(state):
+    """今天还能不能开话题？现在是不是合适的时间？"""
+    if not TOPIC_ENABLE:
+        return False
+    hour = time.localtime().tm_hour
+    if TOPIC_START_HOUR <= TOPIC_END_HOUR:
+        if not (TOPIC_START_HOUR <= hour < TOPIC_END_HOUR):
+            return False
+    else:                                  # 跨零点的时间窗
+        if not (hour >= TOPIC_START_HOUR or hour < TOPIC_END_HOUR):
+            return False
+
+    today = time.strftime("%Y-%m-%d")
+    if state["topic_day"] != today:
+        state["topic_day"] = today
+        state["topic_today"] = 0
+    return state["topic_today"] < TOPIC_MAX_PER_DAY
+
+
+async def pick_member(group_id, self_id, state):
+    """随机挑一个群友，尽量不跟上一次重复。"""
+    resp = await call_api("get_group_member_list", {"group_id": group_id})
+    members = (resp or {}).get("data") or []
+    candidates = [
+        m for m in members
+        if str(m.get("user_id")) != str(self_id)
+        and m.get("user_id") not in state.get("topic_skip", set())
+    ]
+    if not candidates:
+        return None
+    # 排除机器人自己（昵称里带"大肥鱼"的号）
+    candidates = [m for m in candidates if BOT_NICK not in (m.get("card") or m.get("nickname") or "")]
+    if not candidates:
+        return None
+    m = random.choice(candidates)
+    last = state["topic_last_user"].get(group_id)
+    if len(candidates) > 1 and m.get("user_id") == last:
+        m = random.choice([c for c in candidates if c.get("user_id") != last])
+    state["topic_last_user"][group_id] = m.get("user_id")
+    return m
+
+
+async def make_topic(state, group_id):
+    """生成一句 @ 人开话题的话，返回 (昵称, 文字)；不成就返回 (None, None)。"""
+    if not topic_allowed(state):
+        return None, None, None
+
+    history = list(state["history"].get(group_id) or [])
+    member = await pick_member(group_id, state.get("self_id"), state)
+    if not member:
+        return None, None
+
+    nick = member.get("card") or member.get("nickname") or "群友"
+    recent = "\n".join("%s: %s" % (h["nick"], h["text"]) for h in history[-6:]) or "（群里一直没人说话）"
+    prof = memory.profile(nick, member.get("user_id"))
+    extra = "\n你对他的印象：%s" % prof if prof else ""
+
+    try:
+        resp = await _client().chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "system", "content": SYSTEM_PROMPT + "\n\n" + TOPIC_PROMPT},
+                      {"role": "user", "content": "最近群里的聊天：\n%s%s\n\n你要 @ 的人是：%s"
+                                                 % (recent, extra, nick)}],
+            temperature=1.0, max_tokens=100)
+        text = (resp.choices[0].message.content or "").strip().strip('"“”')
+    except Exception as exc:
+        log("[开话题] 生成失败:", str(exc)[:60])
+        return None, None, None
+
+    # 模型有时会把名字写进正文，@ 已经带了，去掉避免「@X X，…」
+    for prefix in ("@" + nick, nick + "，", nick + ",", nick + " "):
+        if text.startswith(prefix):
+            text = text[len(prefix):].lstrip("，, ")
+            break
+
+    if not text or len(text) > 60:
+        return None, None, None
+    return nick, member.get("user_id"), text[:60]
+
+
+async def topic_loop(state):
+    """后台循环：隔一阵子主动 @ 个人开话题。"""
+    while True:
+        wait = random.uniform(TOPIC_MIN_INTERVAL, TOPIC_MAX_INTERVAL)
+        await asyncio.sleep(wait)
+        try:
+            group_id = state.get("topic_group")
+            if not group_id:
+                resp = await call_api("get_group_list", {})
+                groups = (resp or {}).get("data") or []
+                if not groups:
+                    continue
+                group_id = groups[0].get("group_id")
+                state["topic_group"] = group_id
+
+            nick, member_id, text = await make_topic(state, group_id)
+            if not text:
+                continue
+            state["topic_today"] += 1
+            log("[开话题] @%s -> %s" % (nick, text))
+            await send_group(state["ws"], group_id, text, at_user=member_id)
+        except Exception as exc:
+            log("[开话题] 出错:", str(exc)[:80])
+
+
 async def maybe_chime_in(history, state, group_id):
     """让模型看一眼最近的聊天，决定要不要自己插话。"""
     if not os.getenv("OPENAI_API_KEY"):
@@ -457,11 +584,16 @@ def should_reply(event, text, self_id):
     return any(name in text for name in NAMES)
 
 
-async def send_group(ws, group_id, text, images=None):
-    """发一句文字，可以顺带一张表情包（合成一条消息发出去）。"""
-    if images:
-        message = [{"type": "text", "data": {"text": text}}]
-        message.extend(memes.to_segment(img) for img in images[:1])
+async def send_group(ws, group_id, text, images=None, at_user=None):
+    """发一句文字，可以顺带 @ 人、带一张表情包。"""
+    if images or at_user:
+        message = []
+        if at_user:
+            message.append({"type": "at", "data": {"qq": str(at_user)}})
+            message.append({"type": "text", "data": {"text": " "}})
+        message.append({"type": "text", "data": {"text": text}})
+        if images:
+            message.extend(memes.to_segment(img) for img in images[:1])
     else:
         message = text
     await ws.send(json.dumps({
@@ -480,6 +612,7 @@ async def handle_event(ws, event, state):
     sender = event.get("sender") or {}
     nickname = sender.get("card") or sender.get("nickname") or "某人"
     user_id = sender.get("user_id")
+    state["self_id"] = state.get("self_id") or event.get("self_id")
     text, images, faces = parse_message(event.get("message"))
 
     # 图片/表情消息也要能进上下文，不然它根本不知道有人发了图
@@ -583,16 +716,21 @@ async def run_bot():
             kwargs["extra_headers"] = headers
 
     state = {"history": {}, "last_reply": {}, "last_auto": {},
-             "auto_times": {}, "msg_times": {}}
+             "auto_times": {}, "msg_times": {},
+             "topic_today": 0, "topic_day": "", "topic_last_user": {},
+             "topic_group": None, "self_id": None}
     while True:
         try:
             print("连接", WS_URL, "...")
             global WS_KWARGS
             WS_KWARGS = kwargs
             async with websockets.connect(WS_URL, **kwargs) as ws:
-                print("已连接。工具 %s，自主插话概率 %.0f%%，记忆 %s，表情存档 %s"
+                print("已连接。工具 %s，自主插话概率 %.0f%%，记忆 %s，表情存档 %s，开话题 %s"
                       % ("开" if USE_TOOLS else "关", AUTO_CHANCE * 100, memory.stats(),
-                         "开" if MEME_SAVE else "关"))
+                         "开" if MEME_SAVE else "关", "开" if TOPIC_ENABLE else "关"))
+                state["ws"] = ws
+                if not state.get("topic_task"):
+                    state["topic_task"] = asyncio.create_task(topic_loop(state))
                 async for raw in ws:
                     try:
                         event = json.loads(raw)
