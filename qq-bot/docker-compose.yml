@@ -27,6 +27,8 @@ services:
     environment:
       NAPCAT_UID: "0"
       NAPCAT_GID: "0"
+      # 快速登录用的 QQ 号：配了之后重启不再需要扫码
+      ACCOUNT: "3270054750"
     networks:
       - qqnet
 
