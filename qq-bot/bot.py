@@ -49,7 +49,8 @@ WS_URL = os.getenv("ONEBOT_WS", "ws://127.0.0.1:3001")
 WS_TOKEN = os.getenv("ONEBOT_TOKEN", "").strip()
 MODEL = os.getenv("MODEL", "gpt-4o-mini")
 NAMES = [n.strip() for n in os.getenv("BOT_NAMES", "肥鱼,大肥鱼").split(",") if n.strip()]
-COOLDOWN = float(os.getenv("COOLDOWN", "6"))      # 同一群最短回复间隔（秒）
+BOT_NICK = "大肥鱼"                                # 它自己的名字，用于区分"谁说的"
+COOLDOWN = float(os.getenv("COOLDOWN", "3"))      # 同一群最短回复间隔（秒）
 MAX_HISTORY = 20                                   # 带多少条上下文
 MAX_REPLY_LEN = 120                                # 回复过长截断
 
@@ -75,7 +76,9 @@ async def ask_model(history, text, nickname):
     client = AsyncOpenAI(base_url=os.getenv("OPENAI_BASE_URL") or None)
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     for item in history:
-        messages.append({"role": "user", "content": "%s: %s" % (item["nick"], item["text"])})
+        # 自己说过的话用 assistant 角色，模型才知道那是"我"说的，不会重复
+        role = "assistant" if item["nick"] == BOT_NICK else "user"
+        messages.append({"role": role, "content": "%s: %s" % (item["nick"], item["text"])})
     messages.append({
         "role": "user",
         "content": "%s: %s\n（以群友身份回一句，最多 40 字，别解释）" % (nickname, text),
@@ -151,6 +154,8 @@ async def handle_event(ws, event, state):
 
     print("[回复]", reply)
     await send_group(ws, group_id, reply)
+    # 把自己说的话也记进上下文，否则它会忘了刚说过什么、反复重复
+    history.append({"nick": "大肥鱼", "text": reply})
 
 
 # ---------------------------------------------------------------- 两种模式
