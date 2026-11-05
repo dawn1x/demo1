@@ -1,0 +1,53 @@
+# 大肥鱼：协议端 + 机器人，一条命令起两个容器
+#
+#   docker compose up -d --build
+#   docker compose logs -f bot
+#
+# 首次登录：在服务器上开 SSH 隧道后访问 http://127.0.0.1:6099 扫码
+#   ssh -L 6099:127.0.0.1:6099 用户名@服务器IP
+#
+# 注意：镜像名和端口以 NapCat 官方文档为准（https://napneko.pages.dev/），
+#      版本更新后镜像名可能变。
+
+services:
+  napcat:
+    image: mlikiowa/napcat-docker:latest
+    container_name: napcat
+    restart: always
+    ports:
+      # WebUI 只监听服务器本机，不对公网开放，用 SSH 隧道访问
+      - "127.0.0.1:6099:6099"
+      # OneBot WebSocket，只给本机的机器人用
+      - "127.0.0.1:3001:3001"
+    volumes:
+      - ./napcat/config:/app/napcat/config
+      - ./napcat/qq:/app/.config/QQ
+      # 登录二维码会写在这里，方便外部查看/刷新
+      - ./napcat/cache:/app/napcat/cache
+    environment:
+      NAPCAT_UID: "0"
+      NAPCAT_GID: "0"
+    networks:
+      - qqnet
+
+  bot:
+    build:
+      context: .
+      args:
+        # 国内服务器换成 https://mirrors.aliyun.com/pypi/simple/
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+    container_name: dafeiyu-bot
+    restart: always
+    depends_on:
+      - napcat
+    env_file:
+      - .env
+    environment:
+      # 容器之间用服务名互访，覆盖 .env 里的 127.0.0.1
+      ONEBOT_WS: ws://napcat:3001
+    networks:
+      - qqnet
+
+networks:
+  qqnet:
+    driver: bridge

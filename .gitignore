@@ -8,3 +8,17 @@
 
 # Logs
 *.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 密钥：绝对不能提交
+.env
+*.env
+!*.env.example
+
+# 协议端数据
+qq-bot/napcat/
