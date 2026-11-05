@@ -80,6 +80,8 @@ TOPIC_MAX_INTERVAL = float(os.getenv("TOPIC_MAX_INTERVAL", "14400"))   # 4 小�
 TOPIC_MAX_PER_DAY = int(os.getenv("TOPIC_MAX_PER_DAY", "3"))
 TOPIC_START_HOUR = int(os.getenv("TOPIC_START_HOUR", "9"))
 TOPIC_END_HOUR = int(os.getenv("TOPIC_END_HOUR", "23"))
+# 只 @ 最近这么多天里发过言的人（死人不 @）
+TOPIC_ACTIVE_DAYS = float(os.getenv("TOPIC_ACTIVE_DAYS", "7"))
 
 
 def log(*parts):
@@ -361,6 +363,53 @@ def auto_allowed(state, group_id):
     return random.random() < AUTO_CHANCE
 
 
+SPEAKER_PATH = os.path.join(HERE, "data", "speakers.json")
+
+
+def load_speakers():
+    try:
+        with open(SPEAKER_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_speakers(data):
+    try:
+        os.makedirs(os.path.dirname(SPEAKER_PATH), exist_ok=True)
+        tmp = SPEAKER_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, SPEAKER_PATH)
+    except OSError as exc:
+        log("[发言人] 保存失败:", str(exc)[:60])
+
+
+def record_speaker(group_id, uid, nick):
+    """记下谁刚说过话，@ 人时只从这些人里挑。"""
+    if uid is None:
+        return
+    data = load_speakers()
+    g = data.setdefault(str(group_id), {})
+    key = str(uid)
+    item = g.setdefault(key, {"nick": nick, "count": 0})
+    item["nick"] = nick
+    item["last"] = time.time()
+    item["count"] = item.get("count", 0) + 1
+    save_speakers(data)
+
+
+def active_speakers(group_id, limit=20):
+    """最近说过话的人，按时间倒序。"""
+    data = load_speakers()
+    g = data.get(str(group_id), {})
+    cutoff = time.time() - TOPIC_ACTIVE_DAYS * 86400
+    rows = [(int(uid), v) for uid, v in g.items()
+            if v.get("last", 0) >= cutoff and v.get("nick")]
+    rows.sort(key=lambda x: -x[1].get("last", 0))
+    return rows[:limit]
+
+
 TOPIC_PROMPT = """你是 QQ 群群友「大肥鱼」，贴吧暴躁老哥。
 
 现在群里没人说话，你要主动 @ 一个人，抛个话题把场子热起来。
@@ -394,25 +443,65 @@ def topic_allowed(state):
     return state["topic_today"] < TOPIC_MAX_PER_DAY
 
 
+async def seed_speakers(group_id):
+    """启动时从群历史里补一批"谁最近说过话"，免得刚跑起来只能退回成员列表。"""
+    resp = await call_api("get_group_msg_history", {"group_id": group_id, "count": 100})
+    msgs = (resp or {}).get("data", {}).get("messages") or []
+    if not msgs:
+        return 0
+
+    data = load_speakers()
+    g = data.setdefault(str(group_id), {})
+    n = 0
+    for m in msgs:
+        sender = m.get("sender") or {}
+        uid = sender.get("user_id")
+        nick = sender.get("card") or sender.get("nickname")
+        if not uid or not nick:
+            continue
+        key = str(uid)
+        if nick == BOT_NICK or "大肥鱼" in nick:
+            continue
+        item = g.setdefault(key, {"nick": nick, "count": 0})
+        item["nick"] = nick
+        item["last"] = max(item.get("last", 0), float(m.get("time") or 0))
+        item["count"] = item.get("count", 0) + 1
+        n += 1
+    save_speakers(data)
+    return n
+
+
 async def pick_member(group_id, self_id, state):
-    """随机挑一个群友，尽量不跟上一次重复。"""
-    resp = await call_api("get_group_member_list", {"group_id": group_id})
-    members = (resp or {}).get("data") or []
-    candidates = [
-        m for m in members
-        if str(m.get("user_id")) != str(self_id)
-        and m.get("user_id") not in state.get("topic_skip", set())
-    ]
+    """从最近说过话的人里随机挑一个，死人不 @。"""
+    rows = active_speakers(group_id, limit=20)
+    candidates = []
+    for uid, info in rows:
+        if str(uid) == str(self_id):
+            continue
+        if BOT_NICK in (info.get("nick") or ""):
+            continue
+        candidates.append({"user_id": uid, "nickname": info.get("nick"), "card": ""})
+
+    if not candidates:
+        # 还没记录到谁说过话（刚重启/新群），退回群成员列表
+        log("[开话题] 还没有活跃发言人记录，退回群成员列表")
+        resp = await call_api("get_group_member_list", {"group_id": group_id})
+        members = (resp or {}).get("data") or []
+        candidates = [
+            {"user_id": m.get("user_id"), "nickname": m.get("nickname"),
+             "card": m.get("card")}
+            for m in members
+            if str(m.get("user_id")) != str(self_id)
+            and BOT_NICK not in ((m.get("card") or "") + (m.get("nickname") or ""))
+        ]
+
     if not candidates:
         return None
-    # 排除机器人自己（昵称里带"大肥鱼"的号）
-    candidates = [m for m in candidates if BOT_NICK not in (m.get("card") or m.get("nickname") or "")]
-    if not candidates:
-        return None
-    m = random.choice(candidates)
+
     last = state["topic_last_user"].get(group_id)
-    if len(candidates) > 1 and m.get("user_id") == last:
-        m = random.choice([c for c in candidates if c.get("user_id") != last])
+    pool = [c for c in candidates if c.get("user_id") != last] or candidates
+    # 越近说过话的人权重越高：取前 20 个，随机挑
+    m = random.choice(pool[:20])
     state["topic_last_user"][group_id] = m.get("user_id")
     return m
 
@@ -629,6 +718,7 @@ async def handle_event(ws, event, state):
     history = state["history"].setdefault(group_id, deque(maxlen=MAX_HISTORY))
     history.append({"nick": nickname, "text": display, "uid": user_id})
     state["msg_times"].setdefault(group_id, []).append(time.time())
+    record_speaker(group_id, user_id, nickname)
 
     # ---- 路径 A：被叫了，正经回 ----
     if should_reply(event, text, self_id):
@@ -729,6 +819,24 @@ async def run_bot():
                       % ("开" if USE_TOOLS else "关", AUTO_CHANCE * 100, memory.stats(),
                          "开" if MEME_SAVE else "关", "开" if TOPIC_ENABLE else "关"))
                 state["ws"] = ws
+                if not state.get("seeded"):
+                    state["seeded"] = True
+                    try:
+                        info = ((await call_api("get_login_info", {})) or {}).get("data") or {}
+                        if info.get("user_id"):
+                            state["self_id"] = info["user_id"]
+                            log("[登录] 自己是 %s（%s）" % (info["user_id"], info.get("nickname")))
+                    except Exception as exc:
+                        log("[登录] 取账号信息失败:", str(exc)[:60])
+                    try:
+                        groups = ((await call_api("get_group_list", {})) or {}).get("data") or []
+                        for grp in groups:
+                            gid = grp.get("group_id")
+                            n = await seed_speakers(gid)
+                            state["topic_group"] = state.get("topic_group") or gid
+                            log("[发言人] 从历史补了 %d 条记录（群 %s）" % (n, gid))
+                    except Exception as exc:
+                        log("[发言人] 补历史失败:", str(exc)[:60])
                 if not state.get("topic_task"):
                     state["topic_task"] = asyncio.create_task(topic_loop(state))
                 async for raw in ws:
