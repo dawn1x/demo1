@@ -13,11 +13,13 @@
 """
 
 import asyncio
+import base64
 import json
 import os
 import random
 import sys
 import time
+import urllib.request
 from collections import deque
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -239,8 +241,8 @@ def _client():
     return AsyncOpenAI(base_url=os.getenv("OPENAI_BASE_URL") or None)
 
 
-def _build_messages(history, text, nickname, user_id=None):
-    """拼提示词：人设 + 此人画像 + 最近聊天 + 当前这句。"""
+def _build_messages(history, text, nickname, user_id=None, image_urls=None):
+    """拼提示词：人设 + 此人画像 + 最近聊天 + 当前这句（可带图）。"""
     system = SYSTEM_PROMPT
     prof = memory.profile(nickname, user_id)
     if prof:
@@ -252,21 +254,29 @@ def _build_messages(history, text, nickname, user_id=None):
             messages.append({"role": "assistant", "content": item["text"]})
         else:
             messages.append({"role": "user", "content": "%s: %s" % (item["nick"], item["text"])})
-    messages.append({
-        "role": "user",
-        "content": "%s: %s\n（以群友身份回一两句，最多 80 字，像真人聊天，别解释。需要事实/天气/梗就先用工具查；想配个表情包就调 send_meme）"
-                   % (nickname, text),
-    })
+
+    if image_urls:
+        # 对方发了图：把图喂给模型，让它真看一眼再回
+        hint = "（对方发了图，先看图再说。以群友身份回一两句，最多 80 字，别解释）"
+        content = [{"type": "text", "text": "%s: %s\n%s" % (nickname, text, hint)}]
+        for u in image_urls[:2]:              # 最多看两张，控制成本
+            content.append({"type": "image_url", "image_url": {"url": u}})
+        messages.append({"role": "user", "content": content})
+    else:
+        hint = ("（以群友身份回一两句，最多 80 字，像真人聊天，别解释。"
+                "需要事实/天气/梗就先用工具查；想配个表情包就调 send_meme）")
+        messages.append({"role": "user",
+                         "content": "%s: %s\n%s" % (nickname, text, hint)})
     return messages
 
 
-async def ask_model(history, text, nickname, user_id=None):
+async def ask_model(history, text, nickname, user_id=None, image_urls=None):
     """调模型生成回复。返回 (文字, 要发的表情包图片列表)。"""
     if not os.getenv("OPENAI_API_KEY"):
         return random.choice(CANNED), []
 
     client = _client()
-    messages = _build_messages(history, text, nickname, user_id)
+    messages = _build_messages(history, text, nickname, user_id, image_urls)
     tools = ALL_TOOLS if USE_TOOLS else None
     steps = MAX_TOOL_STEPS if USE_TOOLS else 1
     images = []
@@ -392,6 +402,53 @@ def plain_text(message):
     return "".join(parts).strip()
 
 
+def parse_message(message):
+    """拆消息段：返回 (文字, 图片段列表, 表情个数)。"""
+    texts, images, faces = [], [], 0
+    for seg in message or []:
+        kind = seg.get("type")
+        data = seg.get("data") or {}
+        if kind == "text":
+            texts.append(data.get("text", ""))
+        elif kind == "image":
+            images.append(data)
+        elif kind in ("face", "mface"):
+            faces += 1
+    return "".join(texts).strip(), images, faces
+
+
+def fetch_image(url, max_bytes=3 * 1024 * 1024, timeout=10):
+    """把图片下载成 bytes。失败返回 None。"""
+    if not url:
+        return None
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0", "Referer": "https://q.qq.com/"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read(max_bytes + 1)
+    except Exception as exc:
+        log("  [图片] 下载失败:", str(exc)[:60])
+        return None
+    if len(data) > max_bytes:
+        return None
+    return data
+
+
+def to_data_url(data):
+    """图片字节转 data URL，喂给支持看图的模型。"""
+    if not data:
+        return None
+    if data[:3] == b"\xff\xd8\xff":
+        mime = "image/jpeg"
+    elif data[:4] == b"GIF8":
+        mime = "image/gif"
+    elif data[:4] == b"RIFF":
+        mime = "image/webp"
+    else:
+        mime = "image/png"
+    return "data:%s;base64,%s" % (mime, base64.b64encode(data).decode())
+
+
 def should_reply(event, text, self_id):
     """被 @ 或者叫了名字才回。"""
     for seg in event.get("message") or []:
@@ -423,12 +480,21 @@ async def handle_event(ws, event, state):
     sender = event.get("sender") or {}
     nickname = sender.get("card") or sender.get("nickname") or "某人"
     user_id = sender.get("user_id")
-    text = plain_text(event.get("message"))
-    if not text:
+    text, images, faces = parse_message(event.get("message"))
+
+    # 图片/表情消息也要能进上下文，不然它根本不知道有人发了图
+    placeholder = ""
+    if images:
+        placeholder += "[图片]"
+    if faces and not text:
+        placeholder += "[表情]"
+    display = (text + (" " + placeholder if placeholder else "")).strip() or "[图片]"
+
+    if not text and not images and not faces:
         return
 
     history = state["history"].setdefault(group_id, deque(maxlen=MAX_HISTORY))
-    history.append({"nick": nickname, "text": text, "uid": user_id})
+    history.append({"nick": nickname, "text": display, "uid": user_id})
     state["msg_times"].setdefault(group_id, []).append(time.time())
 
     # ---- 路径 A：被叫了，正经回 ----
@@ -440,15 +506,24 @@ async def handle_event(ws, event, state):
         state["last_reply"][group_id] = time.time()
 
         log("[收到] %s: %s" % (nickname, text))
+        # 有图就下载下来喂给模型（最多两张）
+        pics = []
+        for seg in images[:2]:
+            data = fetch_image(seg.get("url"))
+            url = to_data_url(data)
+            if url:
+                pics.append(url)
+
         try:
-            reply, images = await ask_model(list(history)[:-1], text, nickname, user_id)
+            reply, memes_out = await ask_model(list(history)[:-1], text or "[图片]",
+                                               nickname, user_id, pics)
         except Exception as exc:
             print("[模型出错]", exc)
             return
-        if not reply and not images:
+        if not reply and not memes_out:
             return
-        log("[回复]", reply, ("+ 表情包 x%d" % len(images)) if images else "")
-        await send_group(ws, group_id, reply or "", images)
+        log("[回复]", reply, ("+ 表情包 x%d" % len(memes_out)) if memes_out else "")
+        await send_group(ws, group_id, reply or "", memes_out)
         history.append({"nick": BOT_NICK, "text": reply})
         return
 
