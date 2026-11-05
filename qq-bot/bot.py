@@ -60,6 +60,7 @@ MAX_TOOL_STEPS = 3
 AUTO_CHANCE = float(os.getenv("AUTO_CHANCE", "0"))      # 每条消息插话的概率，0 = 不插话
 AUTO_COOLDOWN = float(os.getenv("AUTO_COOLDOWN", "600"))  # 同群两次插话最短间隔（秒）
 AUTO_MAX_PER_HOUR = int(os.getenv("AUTO_MAX_PER_HOUR", "3"))
+MEME_LIVE = os.getenv("MEME_LIVE", "1") == "1"   # 1=现搜现发，0=只用本地图库
 
 
 # ---------------------------------------------------------------- 工具
@@ -108,12 +109,13 @@ MEME_TOOL = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "tag": {
+                    "query": {
                         "type": "string",
-                        "description": "情绪分类，可选：" + "、".join(memes.CATEGORIES.keys()),
+                        "description": "想要什么样的表情包，用中文描述。比如「无语」「笑死」"
+                                       "「狗头」「嘲讽」「猫猫 震惊」。可以带主体。",
                     },
                 },
-                "required": ["tag"],
+                "required": ["query"],
             },
         },
     },
@@ -130,12 +132,13 @@ def run_any_tool(name, args, images=None):
     if name == "recall":
         return memory.recall(args.get("nick", ""))
     if name == "send_meme":
-        data, cat = memes.pick(args.get("tag"))
+        query = args.get("query") or args.get("tag") or ""
+        data, desc = memes.get_meme(query, live=MEME_LIVE)
         if not data:
-            return "表情包库是空的，发不了"
+            return "没搜到合适的表情包，这次就不发了"
         if images is not None:
             images.append(data)
-        return "已发一张【%s】的表情包" % cat
+        return "已发一张「%s」表情包" % (desc or query)
     return run_tool(name, args)
 
 
