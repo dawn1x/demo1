@@ -54,6 +54,14 @@ COOLDOWN = float(os.getenv("COOLDOWN", "3"))
 MAX_HISTORY = 20
 MAX_REPLY_LEN = 200
 
+# 表情包存档：写到 NapCat 容器也能看到的共享目录，再调 add_custom_face 存进 QQ 收藏表情
+MEME_SAVE = os.getenv("MEME_SAVE", "1") == "1"
+SHARE_DIR = os.getenv("NAPCAT_SHARE_DIR", "/opt/dafeiyu/napcat/cache")
+SHARE_PATH = os.getenv("NAPCAT_SHARE_PATH", "/app/napcat/cache")
+
+# 连接参数，工具调 API 时另开一条连接用
+WS_KWARGS = {}
+
 USE_TOOLS = os.getenv("USE_TOOLS", "1") == "1"
 MAX_TOOL_STEPS = 3
 
@@ -104,7 +112,7 @@ MEME_TOOL = [
         "type": "function",
         "function": {
             "name": "send_meme",
-            "description": "发一张表情包。别每句都发，气氛到了、要表达情绪时才发。",
+            "description": "发一张表情包（同时会存进 QQ 收藏表情）。别每句都发，气氛到了才发。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -118,26 +126,100 @@ MEME_TOOL = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_meme",
+            "description": "只存进 QQ 收藏表情，不发出去。群友说「这张收了」「存一下」时用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "要存的表情包描述"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 ALL_TOOLS = TOOL_SCHEMAS + MEMORY_TOOLS + MEME_TOOL
 
 
-def run_any_tool(name, args, images=None):
+async def call_api(action, params, timeout=20):
+    """调一个 OneBot 接口。
+
+    另开一条连接，不复用收事件的那条——否则会跟事件循环抢 ws.recv()。
+    """
+    import websockets
+
+    echo = "tool-" + str(random.randint(1, 10 ** 9))
+    try:
+        async with websockets.connect(WS_URL, **WS_KWARGS) as conn:
+            await conn.send(json.dumps({"action": action, "params": params, "echo": echo}))
+            while True:
+                raw = await asyncio.wait_for(conn.recv(), timeout=timeout)
+                try:
+                    msg = json.loads(raw)
+                except ValueError:
+                    continue
+                if msg.get("echo") == echo:
+                    return msg
+    except Exception as exc:
+        print("[API出错] %s: %s" % (action, exc))
+        return None
+
+
+async def save_to_favorites(data):
+    """把图片存进 QQ 的收藏表情（add_custom_face）。"""
+    if not MEME_SAVE:
+        return "存档已关闭"
+    try:
+        os.makedirs(SHARE_DIR, exist_ok=True)
+    except OSError as exc:
+        return "共享目录不可写：%s" % exc
+
+    name = "meme_%d_%d.png" % (int(time.time()), random.randint(1000, 9999))
+    local = os.path.join(SHARE_DIR, name)
+    remote = SHARE_PATH.rstrip("/") + "/" + name
+    try:
+        with open(local, "wb") as f:
+            f.write(data)
+        resp = await call_api("add_custom_face", {"file": remote, "is_origin": True})
+    except Exception as exc:
+        return "存档失败：%s" % exc
+    finally:
+        try:
+            os.remove(local)          # 存完就删，不在磁盘上留图
+        except OSError:
+            pass
+
+    if not resp:
+        return "存档没响应"
+    if resp.get("status") == "ok":
+        return "已存进 QQ 收藏表情"
+    return "存档失败：%s" % (resp.get("message") or resp.get("wording") or "")
+
+
+async def run_any_tool(name, args, images=None):
     """执行工具。images 用来收集本次要发的表情包图片。"""
     if name == "remember":
         return memory.remember(args.get("nick", ""), args.get("content", ""),
                                args.get("kind", "fact"))
     if name == "recall":
         return memory.recall(args.get("nick", ""))
-    if name == "send_meme":
+
+    if name in ("send_meme", "save_meme"):
         query = args.get("query") or ""
         data, src = memes.get_meme(query)
         if not data:
-            return "没搜到合适的表情包，这次先不发"
+            return "没搜到合适的表情包"
+        saved = await save_to_favorites(data)
+        if name == "save_meme":
+            return "存了一张「%s」表情包（%s）" % (query, saved)
         if images is not None:
             images.append(data)
-        return "已发一张「%s」表情包" % query
+        return "已发一张「%s」表情包（%s）" % (query, saved)
+
     return run_tool(name, args)
 
 
@@ -200,7 +282,7 @@ async def ask_model(history, text, nickname, user_id=None):
                 args = json.loads(call.function.arguments or "{}")
             except ValueError:
                 args = {}
-            result = run_any_tool(call.function.name, args, images)
+            result = await run_any_tool(call.function.name, args, images)
             print("    [工具] %s(%s) -> %s" % (call.function.name, args, result[:80]))
             messages.append({
                 "role": "tool",
@@ -407,9 +489,12 @@ async def run_bot():
     while True:
         try:
             print("连接", WS_URL, "...")
+            global WS_KWARGS
+            WS_KWARGS = kwargs
             async with websockets.connect(WS_URL, **kwargs) as ws:
-                print("已连接。工具 %s，自主插话概率 %.0f%%，记忆 %s"
-                      % ("开" if USE_TOOLS else "关", AUTO_CHANCE * 100, memory.stats()))
+                print("已连接。工具 %s，自主插话概率 %.0f%%，记忆 %s，表情存档 %s"
+                      % ("开" if USE_TOOLS else "关", AUTO_CHANCE * 100, memory.stats(),
+                         "开" if MEME_SAVE else "关"))
                 async for raw in ws:
                     try:
                         event = json.loads(raw)
