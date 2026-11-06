@@ -77,6 +77,7 @@ REPLY_CHANCE = float(os.getenv("REPLY_CHANCE", "0.92"))        # 看到了就回
 QUIET_START = int(os.getenv("QUIET_START", "1"))               # 深夜装睡
 QUIET_END = int(os.getenv("QUIET_END", "7"))
 
+SMART_CHIME = os.getenv("SMART_CHIME", "1") == "1"   # 1=让模型读气氛决定接不接，0=沿用概率闸
 AUTO_CHANCE = float(os.getenv("AUTO_CHANCE", "0.3"))     # 每条消息被考虑接话的概率，0 = 不接
 AUTO_COOLDOWN = float(os.getenv("AUTO_COOLDOWN", "90"))   # 两次接话最短间隔（秒）
 AUTO_MAX_PER_HOUR = int(os.getenv("AUTO_MAX_PER_HOUR", "20"))
@@ -487,7 +488,21 @@ def auto_allowed(state, group_id):
     recent = [t for t in state["auto_times"].get(group_id, []) if t > hour_ago]
     if len(recent) >= AUTO_MAX_PER_HOUR:
         return False
+    if SMART_CHIME:
+        return True          # 不掷骰子，交给模型判断
     return random.random() < AUTO_CHANCE
+
+
+def worth_reading(text, faces, images):
+    """太碎的消息不值得为它调一次模型，先过滤掉省钱。"""
+    t = (text or "").strip()
+    if images or faces:
+        return True                      # 发图发表情，可能有戏
+    if len(t) < 2:
+        return False                     # 「6」「？」「草」这种单字
+    if t in ("6", "？", "?", "。。", "...", "嗯", "哦", "知道了", "好的"):
+        return False
+    return True
 
 
 SPEAKER_PATH = os.path.join(HERE, "data", "speakers.json")
@@ -798,6 +813,11 @@ async def maybe_chime_in(history, state, group_id):
         return None
     if not auto_allowed(state, group_id):
         log("  [自主] 被粗筛挡掉（冷清/冷却/配额/概率）")
+        return None
+
+    last = history[-1] if history else None
+    if SMART_CHIME and last and not worth_reading(last.get("text"), 0, False):
+        log("  [自主] 这条太碎，不值得理")
         return None
 
     recent = list(history)[-6:]
