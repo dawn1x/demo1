@@ -100,6 +100,24 @@ def affinity_prompt(nick, uid=None):
     return "你对「%s」的好感度 %d，态度：%s" % (nick, score, _level_text(score))
 
 
+# 本地关键词判定，不依赖模型记得调工具
+INSULTS = ("傻狗", "傻逼", "sb", "SB", "滚", "闭嘴", "放屁", "锤子", "垃圾", "废物",
+           "菜狗", "煞笔", "神经病", "你妈", "草泥", "闭嘴吧")
+PRAISES = ("牛", "厉害", "在理", "说得对", "有道理", "强", "顶", "支持", "服了")
+
+
+def auto_affinity(nick, uid, text):
+    """按消息内容自动加减好感，返回变化说明或 None。"""
+    t = text or ""
+    hit_bad = next((w for w in INSULTS if w in t), None)
+    if hit_bad:
+        return affinity_add(nick, uid, -2, "说了「%s」" % hit_bad)
+    hit_good = next((w for w in PRAISES if w in t), None)
+    if hit_good:
+        return affinity_add(nick, uid, 1, "说了「%s」" % hit_good)
+    return None
+
+
 # ---------------------------------------------------------------- 群友档案
 def record_message(uid, nick, has_image=False):
     if uid is None:

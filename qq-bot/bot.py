@@ -1000,6 +1000,9 @@ async def handle_event(ws, event, state):
     state["last_msg_time"] = time.time()
     record_speaker(group_id, user_id, nickname)
     fun.record_message(user_id, nickname, has_image=bool(images))
+    change = fun.auto_affinity(nickname, user_id, display)
+    if change:
+        log("[好感]", change)
 
     # ---- 路径 A0：刚跟这人聊过，他接着说就继续接 ----
     last_user = state["last_reply_user"].get(group_id)
