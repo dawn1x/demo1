@@ -1091,6 +1091,18 @@ async def handle_event(ws, event, state):
             return
         if not reply and not memes_out:
             return
+        # 模型有时只在文字里打「[图片]」而没真调工具，这里兜底
+        placeholders = ("[图片]", "[表情包]", "（图片）", "(图片)", "[图]")
+        asked_image = any(k in text for k in ("图", "表情包", "表情"))
+        if not memes_out and any(p in reply for p in placeholders):
+            for p in placeholders:
+                reply = reply.replace(p, "").strip()
+            if asked_image:
+                data, _ = memes.get_meme(text[:20] or "无语")
+                if data:
+                    memes_out.append(data)
+                    log("  [兜底] 它只说没发，帮它补一张图")
+
         # 偶尔"看到了但不想理"
         if not following and random.random() > REPLY_CHANCE:
             log("[已读不回] 这条懒得回")
