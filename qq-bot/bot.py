@@ -57,7 +57,7 @@ MAX_HISTORY = 20
 MAX_REPLY_LEN = 200
 
 # 表情包存档：写到 NapCat 容器也能看到的共享目录，再调 add_custom_face 存进 QQ 收藏表情
-MEME_SAVE = os.getenv("MEME_SAVE", "1") == "1"
+MEME_SAVE = os.getenv("MEME_SAVE", "0") == "1"   # 存档会多一次上传，稳字优先默认关
 SHARE_DIR = os.getenv("NAPCAT_SHARE_DIR", "/opt/dafeiyu/napcat/cache")
 SHARE_PATH = os.getenv("NAPCAT_SHARE_PATH", "/app/napcat/cache")
 
@@ -67,14 +67,14 @@ WS_KWARGS = {}
 USE_TOOLS = os.getenv("USE_TOOLS", "1") == "1"
 MAX_TOOL_STEPS = 3
 
-AUTO_CHANCE = float(os.getenv("AUTO_CHANCE", "1.0"))     # 每条消息被考虑接话的概率，0 = 不接
-AUTO_COOLDOWN = float(os.getenv("AUTO_COOLDOWN", "15"))   # 两次接话最短间隔（秒）
-AUTO_MAX_PER_HOUR = int(os.getenv("AUTO_MAX_PER_HOUR", "80"))
+AUTO_CHANCE = float(os.getenv("AUTO_CHANCE", "0.3"))     # 每条消息被考虑接话的概率，0 = 不接
+AUTO_COOLDOWN = float(os.getenv("AUTO_COOLDOWN", "90"))   # 两次接话最短间隔（秒）
+AUTO_MAX_PER_HOUR = int(os.getenv("AUTO_MAX_PER_HOUR", "20"))
 AUTO_ALIVE_WINDOW = float(os.getenv("AUTO_ALIVE_WINDOW", "600"))
 AUTO_ALIVE_MIN = int(os.getenv("AUTO_ALIVE_MIN", "1"))
 
 # 主动 @ 人开话题：频率低，默认 2~4 小时一次，每天最多 3 次，只在白天
-TOPIC_ENABLE = os.getenv("TOPIC_ENABLE", "1") == "1"
+TOPIC_ENABLE = os.getenv("TOPIC_ENABLE", "0") == "1"
 TOPIC_MIN_INTERVAL = float(os.getenv("TOPIC_MIN_INTERVAL", "7200"))    # 2 小时
 TOPIC_MAX_INTERVAL = float(os.getenv("TOPIC_MAX_INTERVAL", "14400"))   # 4 小时
 TOPIC_MAX_PER_DAY = int(os.getenv("TOPIC_MAX_PER_DAY", "3"))
@@ -85,6 +85,11 @@ TOPIC_ACTIVE_DAYS = float(os.getenv("TOPIC_ACTIVE_DAYS", "7"))
 
 # 对话延续：刚跟某人聊过，这段时间内他再说就不用重新 @
 FOLLOW_UP_SECONDS = float(os.getenv("FOLLOW_UP_SECONDS", "180"))
+
+# 健康检查：定期比对「群里最新消息」和「我们收到的最后一条」，抓半死连接
+HEALTH_INTERVAL = float(os.getenv("HEALTH_INTERVAL", "300"))
+HEALTH_MISS_SECONDS = float(os.getenv("HEALTH_MISS_SECONDS", "120"))
+AUTO_RECOVER = os.getenv("AUTO_RECOVER", "1") == "1"   # 连续漏消息时自动重启 NapCat
 
 
 def log(*parts):
@@ -558,6 +563,66 @@ async def make_topic(state, group_id):
     return nick, member.get("user_id"), text[:60]
 
 
+async def health_loop(state):
+    """定期检查「是不是漏消息了」。
+
+    今早那种故障：WS 连着、心跳也在，但 QQ 那边的事件不再推过来。
+    靠比对群历史里最新消息的时间，就能发现我们错过了。
+    """
+    misses = 0
+    while True:
+        await asyncio.sleep(HEALTH_INTERVAL)
+        gid = state.get("topic_group")
+        if not gid:
+            continue
+
+        resp = await call_api("get_group_msg_history", {"group_id": gid, "count": 3})
+        if not resp or resp.get("status") != "ok":
+            log("[健康检查] 调不通 OneBot，强制重连")
+            ws = state.get("ws")
+            if ws:
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+            continue
+
+        msgs = (resp.get("data") or {}).get("messages") or []
+        if not msgs:
+            continue
+
+        newest = msgs[-1]
+        newest_time = float(newest.get("time") or 0)
+        sender = newest.get("sender") or {}
+        is_self = str(sender.get("user_id")) == str(state.get("self_id"))
+        last = state.get("last_msg_time", 0)
+
+        if is_self or newest_time <= last + HEALTH_MISS_SECONDS:
+            misses = 0
+            continue
+
+        misses += 1
+        log("[健康检查] 漏消息了：群里最新消息比我们处理的晚 %.0f 秒（连续 %d 次）"
+            % (newest_time - last, misses))
+
+        ws = state.get("ws")
+        if ws:
+            try:
+                await ws.close()          # 先断 WS，让它重连
+            except Exception:
+                pass
+
+        if misses >= 2 and AUTO_RECOVER:
+            log("[健康检查] 连续漏消息，重启 NapCat 恢复会话")
+            try:
+                import subprocess
+                subprocess.Popen(["docker", "restart", "napcat"])
+                state["last_msg_time"] = time.time()
+                misses = 0
+            except Exception as exc:
+                log("[健康检查] 重启失败:", str(exc)[:60])
+
+
 async def topic_loop(state):
     """后台循环：隔一阵子主动 @ 个人开话题。"""
     while True:
@@ -733,6 +798,7 @@ async def handle_event(ws, event, state):
     history = state["history"].setdefault(group_id, deque(maxlen=MAX_HISTORY))
     history.append({"nick": nickname, "text": display, "uid": user_id})
     state["msg_times"].setdefault(group_id, []).append(time.time())
+    state["last_msg_time"] = time.time()
     record_speaker(group_id, user_id, nickname)
 
     # ---- 路径 A0：刚跟这人聊过，他接着说就继续接 ----
@@ -867,11 +933,21 @@ async def run_bot():
                         log("[发言人] 补历史失败:", str(exc)[:60])
                 if not state.get("topic_task"):
                     state["topic_task"] = asyncio.create_task(topic_loop(state))
-                async for raw in ws:
+                if not state.get("health_task"):
+                    state["health_task"] = asyncio.create_task(health_loop(state))
+                # 不用 async for：加看门狗，90 秒收不到任何东西就认为连接假死
+                while True:
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=90)
+                    except asyncio.TimeoutError:
+                        log("[看门狗] 90 秒没收到任何事件（心跳也没有），重连")
+                        break
                     try:
                         event = json.loads(raw)
                     except ValueError:
                         continue
+                    if event.get("post_type") == "meta_event":
+                        continue          # 心跳不用处理，收到就说明连接活着
                     asyncio.create_task(handle_event(ws, event, state))
         except Exception as exc:
             print("连接断开：", exc, "，5 秒后重连")
