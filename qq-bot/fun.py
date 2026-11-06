@@ -209,20 +209,24 @@ BEATS = {"剪刀": "石头", "布": "剪刀", "石头": "布"}
 
 
 def play_rps(choice):
+    """只返回事实（谁出什么、谁赢），话让模型自己说。"""
     choice = (choice or "").strip()
     for k in RPS:
         if k in choice:
             choice = k
             break
     if choice not in RPS:
-        return "出石头剪刀布，别出别的。"
+        return "对方没出石头/剪刀/布，让他重出。"
 
     mine = random.choice(list(RPS.keys()))
     if choice == mine:
-        return "我出%s，平了。再来。" % mine
-    if BEATS[choice] == mine:          # 我的出法刚好克你，我赢
-        return "我出%s，你出%s。菜，这都输。" % (mine, choice)
-    return "我出%s，你出%s。行吧，这把算你的。" % (mine, choice)
+        result = "平局"
+    elif BEATS[choice] == mine:
+        result = "大肥鱼赢"
+    else:
+        result = "对方赢"
+
+    return "猜拳结果：对方出%s，大肥鱼出%s，%s。（据此回一句，别报菜名）" % (choice, mine, result)
 
 
 LOTS = [
@@ -237,5 +241,6 @@ LOTS = [
 
 
 def draw_lot():
+    """只返回签文，话让模型自己说。"""
     name, tip = random.choice(LOTS)
-    return "抽到「%s」——%s" % (name, tip)
+    return "抽签结果：%s（签文大意：%s）。据此回一句，别照读签文。" % (name, tip)

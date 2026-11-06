@@ -217,10 +217,16 @@ FUN_TOOLS = [
         "type": "function",
         "function": {
             "name": "play_rps",
-            "description": "跟群友猜拳。对方说猜拳/石头剪刀布时用。",
+            "description": "跟群友猜拳。对方说猜拳/石头剪刀布时用。你自己出什么不用传，交给工具随机。",
             "parameters": {
                 "type": "object",
-                "properties": {"choice": {"type": "string", "description": "石头/剪刀/布"}},
+                "properties": {
+                    "choice": {
+                        "type": "string",
+                        "description": "【群友出的】是什么，只能是 石头/剪刀/布。"
+                                       "注意：这是对方的出法，不是你自己的。",
+                    },
+                },
                 "required": ["choice"],
             },
         },
