@@ -94,6 +94,40 @@ def _try(query, tries):
     return None, None
 
 
+_BILI_API = "https://api.bilibili.com/x/web-interface/search/all/v2?"
+
+
+def bilibili_covers(query, limit=5):
+    """从 B 站视频封面里找图。中文梗图这块比必应准得多。"""
+    import json as _json
+
+    url = _BILI_API + urllib.parse.urlencode({"keyword": query})
+    try:
+        page = _get(url, referer="https://www.bilibili.com").decode("utf-8", "ignore")
+        data = _json.loads(page)
+    except Exception:
+        return []
+    if data.get("code") != 0:
+        return []
+
+    pics = []
+    for block in (data.get("data") or {}).get("result") or []:
+        if block.get("result_type") != "video":
+            continue
+        for it in (block.get("data") or [])[:limit]:
+            pic = (it.get("pic") or "").strip()
+            if not pic:
+                continue
+            if pic.startswith("//"):
+                pic = "https:" + pic
+            elif pic.startswith("http://"):
+                pic = "https://" + pic[7:]
+            if pic not in pics:
+                pics.append(pic)
+        break
+    return pics[:limit]
+
+
 # 这些词出现在查询里会搜到奇怪的东西（搜自己名字会出真鱼照片）
 BAD_WORDS = ("大肥鱼", "肥鱼", "qwertyuio")
 
@@ -132,6 +166,17 @@ def get_meme(query, tries=4):
         if cand in seen:
             continue
         seen.add(cand)
+
+        # 先试 B 站封面（中文梗图更准）
+        for pic in bilibili_covers(cand + " 表情包", limit=4):
+            try:
+                data = _get(pic, referer="https://www.bilibili.com")
+            except Exception:
+                continue
+            if MIN_BYTES <= len(data) <= MAX_BYTES:
+                return data, pic
+
+        # 再退回必应图片
         data, src = _try(cand, tries)
         if data:
             return data, src
