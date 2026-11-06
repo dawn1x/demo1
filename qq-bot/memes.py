@@ -94,6 +94,32 @@ def _try(query, tries):
     return None, None
 
 
+BAIDU_IMG = "https://image.baidu.com/search/acjson?"
+
+
+def baidu_images(query, limit=8):
+    """百度图片搜索——中文表情包最准的图源。"""
+    import json as _json
+
+    url = BAIDU_IMG + urllib.parse.urlencode({
+        "tn": "resultjson_com", "ipn": "rj", "word": query,
+        "pn": "0", "rn": str(limit * 2), "nc": "1",
+    })
+    try:
+        data = _json.loads(_get(url, referer="https://image.baidu.com").decode("utf-8", "ignore"))
+    except Exception:
+        return []
+
+    urls = []
+    for it in data.get("data") or []:
+        if not isinstance(it, dict):
+            continue
+        u = it.get("middleURL") or it.get("thumbURL") or it.get("objURL")
+        if u and u not in urls:
+            urls.append(u)
+    return urls[:limit]
+
+
 _BILI_API = "https://api.bilibili.com/x/web-interface/search/all/v2?"
 
 
@@ -167,7 +193,16 @@ def get_meme(query, tries=4):
             continue
         seen.add(cand)
 
-        # 先试 B 站封面（中文梗图更准）
+        # 1) 百度图片：中文表情包最准
+        for pic in baidu_images(cand + " 表情包", limit=6):
+            try:
+                data = _get(pic, referer="https://image.baidu.com")
+            except Exception:
+                continue
+            if MIN_BYTES <= len(data) <= MAX_BYTES:
+                return data, pic
+
+        # 2) B 站封面兜底
         for pic in bilibili_covers(cand + " 表情包", limit=4):
             try:
                 data = _get(pic, referer="https://www.bilibili.com")
@@ -176,7 +211,7 @@ def get_meme(query, tries=4):
             if MIN_BYTES <= len(data) <= MAX_BYTES:
                 return data, pic
 
-        # 再退回必应图片
+        # 3) 必应图片兜底
         data, src = _try(cand, tries)
         if data:
             return data, src
