@@ -1066,8 +1066,12 @@ async def handle_event(ws, event, state):
 
     log("[消息] %s: %s" % (nickname, display[:40]))
 
-    # ---- 路径 A：被叫了，或者刚聊过在延续，正经回 ----
-    if should_reply(event, text, self_id) or following:
+    # 明确要图的请求，当成在叫它
+    wants_pic = any(k in text for k in ("表情包", "发个图", "来张图", "来一张",
+                                        "图呢", "整张图", "发图", "整个图"))
+
+    # ---- 路径 A：被叫了、刚聊过、或者要图，正经回 ----
+    if should_reply(event, text, self_id) or following or wants_pic:
         last = state["last_reply"].get(group_id, 0)
         if time.time() - last < COOLDOWN:
             log("[跳过] 冷却中，%.1f 秒后再说话" % (COOLDOWN - (time.time() - last)))
@@ -1091,17 +1095,19 @@ async def handle_event(ws, event, state):
             return
         if not reply and not memes_out:
             return
-        # 模型有时只在文字里打「[图片]」而没真调工具，这里兜底
+        # 兜底：模型经常嘴上说「发了」却不调工具，代码强制补图
         placeholders = ("[图片]", "[表情包]", "（图片）", "(图片)", "[图]")
-        asked_image = any(k in text for k in ("图", "表情包", "表情"))
-        if not memes_out and any(p in reply for p in placeholders):
-            for p in placeholders:
-                reply = reply.replace(p, "").strip()
-            if asked_image:
-                data, _ = memes.get_meme(text[:20] or "无语")
-                if data:
-                    memes_out.append(data)
-                    log("  [兜底] 它只说没发，帮它补一张图")
+        for p in placeholders:
+            reply = reply.replace(p, "").strip()
+
+        wants_image = any(k in text for k in ("图", "表情包", "表情"))
+        claims_sent = any(k in reply for k in ("发了", "给你整", "走着", "这就给",
+                                               "往上看", "往上翻", "收好"))
+        if not memes_out and (wants_image or claims_sent):
+            data, _ = memes.get_meme(text[:20] or "无语")
+            if data:
+                memes_out.append(data)
+                log("  [兜底] 模型没调工具，代码帮它补一张图")
 
         # 偶尔"看到了但不想理"
         if not following and random.random() > REPLY_CHANCE:
@@ -1122,9 +1128,16 @@ async def handle_event(ws, event, state):
     except Exception as exc:
         print("[自主判断出错]", exc)
         return
+    chime_imgs = []
     if reply:
+        if not chime_imgs and any(k in reply for k in ("发了", "给你整", "这就给")):
+            data, _ = memes.get_meme((text or "无语")[:20])
+            if data:
+                chime_imgs.append(data)
+                log("  [兜底] 插话时也说要发图，补一张")
+
         log("[自主插话] -> %s" % reply)
-        await send_like_human(ws, group_id, reply, at_user=user_id)
+        await send_like_human(ws, group_id, reply, at_user=user_id, images=chime_imgs)
         # 插了话就等于跟这人接上头了，他接着说应该继续接
         state["last_reply_user"][group_id] = (user_id, time.time())
         history.append({"nick": BOT_NICK, "text": reply})
