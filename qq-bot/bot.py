@@ -1059,6 +1059,8 @@ async def handle_event(ws, event, state):
     if reply:
         log("[自主插话] -> %s" % reply)
         await send_like_human(ws, group_id, reply, at_user=user_id)
+        # 插了话就等于跟这人接上头了，他接着说应该继续接
+        state["last_reply_user"][group_id] = (user_id, time.time())
         history.append({"nick": BOT_NICK, "text": reply})
 
 
@@ -1116,9 +1118,11 @@ async def run_bot():
             global WS_KWARGS
             WS_KWARGS = kwargs
             async with websockets.connect(WS_URL, **kwargs) as ws:
-                print("已连接。工具 %s，自主插话概率 %.0f%%，记忆 %s，表情存档 %s，开话题 %s"
-                      % ("开" if USE_TOOLS else "关", AUTO_CHANCE * 100, memory.stats(),
-                         "开" if MEME_SAVE else "关", "开" if TOPIC_ENABLE else "关"))
+                print("已连接。工具 %s，接话模式 %s，记忆 %s，表情存档 %s，开话题 %s"
+                      % ("开" if USE_TOOLS else "关",
+                         "模型判断" if SMART_CHIME else ("概率%.0f%%" % (AUTO_CHANCE * 100)),
+                         memory.stats(), "开" if MEME_SAVE else "关",
+                         "开" if TOPIC_ENABLE else "关"))
                 state["ws"] = ws
                 if not state.get("seeded"):
                     state["seeded"] = True
