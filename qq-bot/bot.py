@@ -1100,11 +1100,12 @@ async def handle_event(ws, event, state):
         for p in placeholders:
             reply = reply.replace(p, "").strip()
 
-        wants_image = any(k in text for k in ("图", "表情包", "表情"))
-        claims_sent = any(k in reply for k in ("发了", "给你整", "走着", "这就给",
-                                               "往上看", "往上翻", "收好"))
+        wants_image = any(k in text for k in ("表情包", "发个图", "来张图", "来一张",
+                                               "图呢", "发图", "整个图", "整张图"))
+        claims_sent = any(k in reply for k in ("给你整", "这就给你", "发了张", "发你了",
+                                               "收好", "往上看", "往上翻"))
         if not memes_out and (wants_image or claims_sent):
-            data, _ = memes.get_meme(text[:20] or "无语")
+            data, _ = memes.get_meme(random.choice(["无语", "笑死", "就这", "绷不住", "嘲讽"]))
             if data:
                 memes_out.append(data)
                 log("  [兜底] 模型没调工具，代码帮它补一张图")
