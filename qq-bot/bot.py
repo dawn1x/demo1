@@ -84,7 +84,8 @@ AUTO_ALIVE_WINDOW = float(os.getenv("AUTO_ALIVE_WINDOW", "600"))
 AUTO_ALIVE_MIN = int(os.getenv("AUTO_ALIVE_MIN", "1"))
 
 # 主动 @ 人开话题：频率低，默认 2~4 小时一次，每天最多 3 次，只在白天
-TOPIC_ENABLE = os.getenv("TOPIC_ENABLE", "0") == "1"
+TOPIC_ENABLE = os.getenv("TOPIC_ENABLE", "1") == "1"
+TOPIC_AT_CHANCE = float(os.getenv("TOPIC_AT_CHANCE", "0.5"))  # 主动开口时 @ 人的概率
 TOPIC_MIN_INTERVAL = float(os.getenv("TOPIC_MIN_INTERVAL", "7200"))    # 2 小时
 TOPIC_MAX_INTERVAL = float(os.getenv("TOPIC_MAX_INTERVAL", "14400"))   # 4 小时
 TOPIC_MAX_PER_DAY = int(os.getenv("TOPIC_MAX_PER_DAY", "3"))
@@ -633,41 +634,51 @@ async def pick_member(group_id, self_id, state):
 
 
 async def make_topic(state, group_id):
-    """生成一句 @ 人开话题的话，返回 (昵称, 文字)；不成就返回 (None, None)。"""
+    """生成一句主动开口的话。返回 (昵称, 对方QQ或None, 文字)。"""
     if not topic_allowed(state):
         return None, None, None
 
     history = list(state["history"].get(group_id) or [])
-    member = await pick_member(group_id, state.get("self_id"), state)
-    if not member:
-        return None, None
 
-    nick = member.get("card") or member.get("nickname") or "群友"
+    # 一半概率 @ 个人，一半概率自己冒一句（自言自语更像真人，也更安全）
+    member = None
+    if random.random() < TOPIC_AT_CHANCE:
+        member = await pick_member(group_id, state.get("self_id"), state)
+
+    if member:
+        nick = member.get("card") or member.get("nickname") or "群友"
+        target = member.get("user_id")
+        ask = "你要 @ 的人是：%s" % nick
+        prof = memory.profile(nick, target)
+        if prof:
+            ask += "\n你对他的印象：%s" % prof
+    else:
+        nick = "（谁也不 @，自己随口冒一句）"
+        target = None
+        ask = "没人叫你，就是你自己想说话了。随便说一句，别写名字，别 @ 人。"
+
     recent = "\n".join("%s: %s" % (h["nick"], h["text"]) for h in history[-6:]) or "（群里一直没人说话）"
-    prof = memory.profile(nick, member.get("user_id"))
-    extra = "\n你对他的印象：%s" % prof if prof else ""
 
     try:
         resp = await _client().chat.completions.create(
             model=MODEL,
             messages=[{"role": "system", "content": SYSTEM_PROMPT + "\n\n" + TOPIC_PROMPT},
-                      {"role": "user", "content": "最近群里的聊天：\n%s%s\n\n你要 @ 的人是：%s"
-                                                 % (recent, extra, nick)}],
+                      {"role": "user", "content": "最近群里的聊天：\n%s\n\n%s" % (recent, ask)}],
             temperature=1.0, max_tokens=100)
         text = (resp.choices[0].message.content or "").strip().strip('"“”')
     except Exception as exc:
-        log("[开话题] 生成失败:", str(exc)[:60])
+        log("[主动开口] 生成失败:", str(exc)[:60])
         return None, None, None
 
-    # 模型有时会把名字写进正文，@ 已经带了，去掉避免「@X X，…」
-    for prefix in ("@" + nick, nick + "，", nick + ",", nick + " "):
-        if text.startswith(prefix):
-            text = text[len(prefix):].lstrip("，, ")
-            break
+    if member:
+        for prefix in ("@" + nick, nick + "，", nick + ",", nick + " "):
+            if text.startswith(prefix):
+                text = text[len(prefix):].lstrip("，, ")
+                break
 
     if not text or len(text) > 60:
         return None, None, None
-    return nick, member.get("user_id"), text[:60]
+    return nick, target, text[:60]
 
 
 async def report_loop(state):
@@ -677,7 +688,7 @@ async def report_loop(state):
         try:
             now = time.localtime()
             week = time.strftime("%Y-%W", now)
-            if now.tm_wday != 0 or now.tm_hour < 10:      # 周一 10 点后
+            if now.tm_wday != 0 or now.tm_hour < 10:
                 continue
             data = fun.load()
             if data.get("last_report") == week:
@@ -699,7 +710,7 @@ async def report_loop(state):
 async def health_loop(state):
     """定期检查「是不是漏消息了」。
 
-    今早那种故障：WS 连着、心跳也在，但 QQ 那边的事件不再推过来。
+    假死故障：WS 连着、心跳也在，但 QQ 那边的事件不再推过来。
     靠比对群历史里最新消息的时间，就能发现我们错过了。
     """
     misses = 0
@@ -741,7 +752,7 @@ async def health_loop(state):
         ws = state.get("ws")
         if ws:
             try:
-                await ws.close()          # 先断 WS，让它重连
+                await ws.close()
             except Exception:
                 pass
 
@@ -775,8 +786,8 @@ async def topic_loop(state):
             if not text:
                 continue
             state["topic_today"] += 1
-            log("[开话题] @%s -> %s" % (nick, text))
-            await send_group(state["ws"], group_id, text, at_user=member_id)
+            log("[主动开口] %s -> %s" % ("@" + nick if member_id else "自说自话", text))
+            await send_like_human(state["ws"], group_id, text, at_user=member_id)
         except Exception as exc:
             log("[开话题] 出错:", str(exc)[:80])
 
