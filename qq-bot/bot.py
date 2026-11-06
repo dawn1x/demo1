@@ -506,6 +506,7 @@ def worth_reading(text, faces, images):
 
 
 SPEAKER_PATH = os.path.join(HERE, "data", "speakers.json")
+HISTORY_PATH = os.path.join(HERE, "data", "history.json")
 
 
 def load_speakers():
@@ -583,6 +584,55 @@ def topic_allowed(state):
         state["topic_day"] = today
         state["topic_today"] = 0
     return state["topic_today"] < TOPIC_MAX_PER_DAY
+
+
+def load_history():
+    """从磁盘恢复最近的聊天，重启不丢上下文。"""
+    try:
+        with open(HISTORY_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_history(state):
+    try:
+        os.makedirs(os.path.dirname(HISTORY_PATH), exist_ok=True)
+        data = {str(gid): list(h) for gid, h in state["history"].items()}
+        tmp = HISTORY_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, HISTORY_PATH)
+    except OSError:
+        pass
+
+
+async def seed_history(group_id, state):
+    """从群历史拉最近 20 条进上下文，重启后也能接着说。"""
+    resp = await call_api("get_group_msg_history", {"group_id": group_id, "count": 20})
+    msgs = (resp or {}).get("data", {}).get("messages") or []
+    if not msgs:
+        return 0
+
+    buf = state["history"].setdefault(group_id, deque(maxlen=MAX_HISTORY))
+    added = 0
+    for m in msgs:
+        sender = m.get("sender") or {}
+        nick = sender.get("card") or sender.get("nickname")
+        if not nick:
+            continue
+        text, images, faces = parse_message(m.get("message"))
+        display = (text + (" [图片]" if images else "")).strip() or ("[图片]" if images else "")
+        if not display:
+            continue
+        if str(sender.get("user_id")) == str(state.get("self_id")):
+            nick = BOT_NICK
+        item = {"nick": nick, "text": display, "uid": sender.get("user_id")}
+        if item["text"] and (not buf or list(buf)[-1].get("text") != item["text"]):
+            buf.append(item)
+            added += 1
+    save_history(state)
+    return added
 
 
 async def seed_speakers(group_id):
@@ -998,6 +1048,7 @@ async def handle_event(ws, event, state):
     history.append({"nick": nickname, "text": display, "uid": user_id})
     state["msg_times"].setdefault(group_id, []).append(time.time())
     state["last_msg_time"] = time.time()
+    save_history(state)
     record_speaker(group_id, user_id, nickname)
     fun.record_message(user_id, nickname, has_image=bool(images))
     change = fun.auto_affinity(nickname, user_id, display)
@@ -1129,6 +1180,14 @@ async def run_bot():
                 state["ws"] = ws
                 if not state.get("seeded"):
                     state["seeded"] = True
+                    for gid, items in load_history().items():
+                        try:
+                            buf = deque(maxlen=MAX_HISTORY)
+                            buf.extend(items)
+                            state["history"][int(gid)] = buf
+                            log("[上下文] 恢复了群 %s 的 %d 条记录" % (gid, len(buf)))
+                        except (ValueError, TypeError):
+                            continue
                     try:
                         info = ((await call_api("get_login_info", {})) or {}).get("data") or {}
                         if info.get("user_id"):
@@ -1141,6 +1200,9 @@ async def run_bot():
                         for grp in groups:
                             gid = grp.get("group_id")
                             n = await seed_speakers(gid)
+                            nh = await seed_history(gid, state)
+                            if nh:
+                                log("[上下文] 从群历史补了 %d 条" % nh)
                             state["topic_group"] = state.get("topic_group") or gid
                             log("[发言人] 从历史补了 %d 条记录（群 %s）" % (n, gid))
                     except Exception as exc:
