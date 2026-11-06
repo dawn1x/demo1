@@ -25,6 +25,7 @@ from collections import deque
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+import fun
 import memes
 import memory
 from persona import SYSTEM_PROMPT
@@ -169,7 +170,72 @@ MEME_TOOL = [
     },
 ]
 
-ALL_TOOLS = TOOL_SCHEMAS + MEMORY_TOOLS + MEME_TOOL
+FUN_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "affinity",
+            "description": "调整某人对你的好感度。有人骂你/损你就减，夸你/帮你说话就加。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "nick": {"type": "string", "description": "群昵称"},
+                    "delta": {"type": "integer", "description": "正整数加分，负整数减分，一般 ±1~3"},
+                    "reason": {"type": "string", "description": "为什么加减"},
+                },
+                "required": ["nick", "delta"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_quote",
+            "description": "把某人的一句名场面存进黑历史，以后可以翻出来。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "nick": {"type": "string", "description": "谁说的"},
+                    "text": {"type": "string", "description": "原话"},
+                },
+                "required": ["nick", "text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "recall_quote",
+            "description": "翻某人的黑历史语录。有人嘴硬、装没说过、或者求锤时用。",
+            "parameters": {
+                "type": "object",
+                "properties": {"nick": {"type": "string", "description": "谁的，可不填"}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "play_rps",
+            "description": "跟群友猜拳。对方说猜拳/石头剪刀布时用。",
+            "parameters": {
+                "type": "object",
+                "properties": {"choice": {"type": "string", "description": "石头/剪刀/布"}},
+                "required": ["choice"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "draw_lot",
+            "description": "抽个签。有人说抽签、求个吉凶、问今天运气时用。",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+]
+
+ALL_TOOLS = TOOL_SCHEMAS + MEMORY_TOOLS + MEME_TOOL + FUN_TOOLS
 
 
 async def call_api(action, params, timeout=20):
@@ -240,6 +306,22 @@ async def run_any_tool(name, args, images=None):
     if name == "recall":
         return memory.recall(args.get("nick", ""))
 
+    if name == "affinity":
+        try:
+            delta = int(args.get("delta", 0))
+        except (TypeError, ValueError):
+            delta = 0
+        return fun.affinity_add(args.get("nick", ""), args.get("uid"), delta,
+                                args.get("reason", ""))
+    if name == "save_quote":
+        return fun.add_quote(args.get("nick", ""), args.get("text", ""))
+    if name == "recall_quote":
+        return fun.recall_quote(args.get("nick") or None)
+    if name == "play_rps":
+        return fun.play_rps(args.get("choice", ""))
+    if name == "draw_lot":
+        return fun.draw_lot()
+
     if name in ("send_meme", "save_meme"):
         query = args.get("query") or ""
         data, src = memes.get_meme(query)
@@ -270,6 +352,7 @@ def _build_messages(history, text, nickname, user_id=None, image_urls=None):
     prof = memory.profile(nickname, user_id)
     if prof:
         system += "\n\n你对「%s」的印象：%s" % (nickname, prof)
+    system += "\n" + fun.affinity_prompt(nickname, user_id)
 
     messages = [{"role": "system", "content": system}]
     for item in history:
@@ -563,6 +646,32 @@ async def make_topic(state, group_id):
     return nick, member.get("user_id"), text[:60]
 
 
+async def report_loop(state):
+    """每周一上午发一次群友档案。"""
+    while True:
+        await asyncio.sleep(1800)
+        try:
+            now = time.localtime()
+            week = time.strftime("%Y-%W", now)
+            if now.tm_wday != 0 or now.tm_hour < 10:      # 周一 10 点后
+                continue
+            data = fun.load()
+            if data.get("last_report") == week:
+                continue
+            text = fun.weekly_report()
+            if not text:
+                continue
+            gid = state.get("topic_group")
+            if not gid or not state.get("ws"):
+                continue
+            await send_group(state["ws"], gid, text)
+            data["last_report"] = week
+            fun.save(data)
+            log("[周报] 已发")
+        except Exception as exc:
+            log("[周报] 出错:", str(exc)[:60])
+
+
 async def health_loop(state):
     """定期检查「是不是漏消息了」。
 
@@ -800,6 +909,7 @@ async def handle_event(ws, event, state):
     state["msg_times"].setdefault(group_id, []).append(time.time())
     state["last_msg_time"] = time.time()
     record_speaker(group_id, user_id, nickname)
+    fun.record_message(user_id, nickname, has_image=bool(images))
 
     # ---- 路径 A0：刚跟这人聊过，他接着说就继续接 ----
     last_user = state["last_reply_user"].get(group_id)
@@ -935,6 +1045,8 @@ async def run_bot():
                     state["topic_task"] = asyncio.create_task(topic_loop(state))
                 if not state.get("health_task"):
                     state["health_task"] = asyncio.create_task(health_loop(state))
+                if not state.get("report_task"):
+                    state["report_task"] = asyncio.create_task(report_loop(state))
                 # 不用 async for：加看门狗，90 秒收不到任何东西就认为连接假死
                 while True:
                     try:
