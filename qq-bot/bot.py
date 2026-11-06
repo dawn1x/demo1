@@ -68,6 +68,15 @@ WS_KWARGS = {}
 USE_TOOLS = os.getenv("USE_TOOLS", "1") == "1"
 MAX_TOOL_STEPS = 3
 
+# 像人的行为参数
+REPLY_DELAY_MIN = float(os.getenv("REPLY_DELAY_MIN", "1.2"))   # 打字前先愣一会儿
+REPLY_DELAY_MAX = float(os.getenv("REPLY_DELAY_MAX", "5.0"))
+SPLIT_REPLY = os.getenv("SPLIT_REPLY", "1") == "1"             # 偶尔分两条发
+AT_CHANCE = float(os.getenv("AT_CHANCE", "0.3"))               # 回复时顺带 @ 对方的概率
+REPLY_CHANCE = float(os.getenv("REPLY_CHANCE", "0.92"))        # 看到了就回的概率（偶尔已读不回）
+QUIET_START = int(os.getenv("QUIET_START", "1"))               # 深夜装睡
+QUIET_END = int(os.getenv("QUIET_END", "7"))
+
 AUTO_CHANCE = float(os.getenv("AUTO_CHANCE", "0.3"))     # 每条消息被考虑接话的概率，0 = 不接
 AUTO_COOLDOWN = float(os.getenv("AUTO_COOLDOWN", "90"))   # 两次接话最短间隔（秒）
 AUTO_MAX_PER_HOUR = int(os.getenv("AUTO_MAX_PER_HOUR", "20"))
@@ -455,10 +464,19 @@ def group_is_alive(state, group_id):
     return len(times) >= AUTO_ALIVE_MIN
 
 
+def is_quiet_hour():
+    h = time.localtime().tm_hour
+    if QUIET_START <= QUIET_END:
+        return QUIET_START <= h < QUIET_END
+    return h >= QUIET_START or h < QUIET_END
+
+
 def auto_allowed(state, group_id):
     """粗筛：冷清判断 + 冷却 + 每小时上限 + 概率。先过这层再问模型，省钱。"""
     if AUTO_CHANCE <= 0:
         return False
+    if is_quiet_hour():
+        return False          # 深夜装睡，只回被 @ 的
     if not group_is_alive(state, group_id):
         return False
     now = time.time()
@@ -868,10 +886,45 @@ def should_reply(event, text, self_id):
     return any(name in text for name in NAMES)
 
 
-async def send_group(ws, group_id, text, images=None, at_user=None):
+def split_message(text, limit=2):
+    """把一句话拆成最多两段，像人打字一段段发。"""
+    text = (text or "").strip()
+    if len(text) < 18:
+        return [text]
+    for sep in ("。", "！", "？", "\n"):
+        if sep in text:
+            parts = [p.strip() for p in text.split(sep) if p.strip()]
+            if len(parts) >= 2:
+                head = parts[0] + ("。" if sep == "。" else sep if sep != "\n" else "")
+                tail = (sep if sep != "\n" else " ").join(parts[1:])
+                return [head, tail][:limit]
+    return [text]
+
+
+async def send_like_human(ws, group_id, text, images=None, at_user=None, reply_to=None):
+    """先愣一会儿再发；长句拆成两段；偶尔 @ 一下。"""
+    await asyncio.sleep(random.uniform(REPLY_DELAY_MIN, REPLY_DELAY_MAX))
+
+    use_at = bool(at_user) and random.random() < AT_CHANCE
+    parts = split_message(text) if (SPLIT_REPLY and not images) else [text]
+
+    for i, part in enumerate(parts):
+        if not part:
+            continue
+        await send_group(ws, group_id, part,
+                         images=images if i == len(parts) - 1 else None,
+                         at_user=at_user if (i == 0 and use_at) else None,
+                         reply_to=reply_to if i == 0 else None)
+        if i < len(parts) - 1:
+            await asyncio.sleep(random.uniform(0.6, 1.8))
+
+
+async def send_group(ws, group_id, text, images=None, at_user=None, reply_to=None):
     """发一句文字，可以顺带 @ 人、带一张表情包。"""
-    if images or at_user:
+    if images or at_user or reply_to:
         message = []
+        if reply_to:
+            message.append({"type": "reply", "data": {"id": str(reply_to)}})
         if at_user:
             message.append({"type": "at", "data": {"qq": str(at_user)}})
             message.append({"type": "text", "data": {"text": " "}})
@@ -953,8 +1006,15 @@ async def handle_event(ws, event, state):
             return
         if not reply and not memes_out:
             return
+        # 偶尔"看到了但不想理"
+        if not following and random.random() > REPLY_CHANCE:
+            log("[已读不回] 这条懒得回")
+            return
+
         log("[回复]", reply, ("+ 表情包 x%d" % len(memes_out)) if memes_out else "")
-        await send_group(ws, group_id, reply or "", memes_out)
+        await send_like_human(ws, group_id, reply or "", memes_out,
+                              at_user=user_id if random.random() < 0.5 else None,
+                              reply_to=event.get("message_id"))
         history.append({"nick": BOT_NICK, "text": reply})
         state["last_reply_user"][group_id] = (user_id, time.time())
         return
@@ -967,7 +1027,7 @@ async def handle_event(ws, event, state):
         return
     if reply:
         log("[自主插话] -> %s" % reply)
-        await send_group(ws, group_id, reply)
+        await send_like_human(ws, group_id, reply, at_user=user_id)
         history.append({"nick": BOT_NICK, "text": reply})
 
 
