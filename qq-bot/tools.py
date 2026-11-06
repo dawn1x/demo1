@@ -89,9 +89,10 @@ def _extract_links(page, query, limit=4):
         seen.add(key)
         # 取链接后一段文字当摘要，顺手清掉 URL 残渣和多余空白
         tail = _strip_tags(page[m.end():m.end() + 1500])
-        tail = re.sub(r"[\w%&=/?.#-]{20,}", " ", tail)      # 长 token 基本都是链接碎片
+        tail = re.sub(r"<[^>]*>?", " ", tail)              # 漏网的标签碎片
+        tail = re.sub(r"\w+=[\w&%/.:-]+", " ", tail)       # data-ext= / href= 之类
+        tail = re.sub(r"[\w%&=/?.#-]{18,}", " ", tail)      # 长 token 基本都是链接
         tail = re.sub(r"\s+", " ", tail).strip(" 　|·-")
-        tail = re.sub(r"^[\s|]+", "", tail)
         snippet = tail[:100] if len(tail) >= 10 else ""
         out.append(("%s｜%s" % (title, snippet)).strip("｜"))
         if len(out) >= limit:
@@ -207,38 +208,58 @@ def _score_line(term, line):
     return score
 
 
+def _explain_from_360(term):
+    """去 360 搜「xxx 是什么意思」，把摘要拼起来当解释。"""
+    q = '"%s" 什么意思 什么梗' % term
+    for query in (q, "%s 什么意思 什么梗" % term):
+        try:
+            url = "https://www.so.com/s?" + urllib.parse.urlencode({"q": query})
+            items = _extract_links(_get(url), query, 3)
+        except Exception:
+            items = []
+        good = [i for i in items if any(k in i for k in ("梗", "意思", "流行", "指", "源于"))]
+        if good:
+            return good
+    return []
+
+
 def lookup_slang(term):
-    """查某个词/梗是什么意思、哪来的。多个查询式都试一遍，挑最像梗的那条。"""
+    """查某个词/梗是什么意思、哪来的。返回尽量可读的解释。"""
     term = (term or "").strip()
     if not term:
         return "没给词"
 
-    best = []          # (score, line)
-    for tmpl in _QUERIES:
-        res = search_web(tmpl % term, limit=4)
-        if "没搜到" in res or "搜不了" in res:
-            continue
-        for line in res.split("\n"):
-            if not line.strip():
-                continue
-            score = _score_line(term, line)
-            if score >= _MIN_SCORE:
-                best.append((score, line))
-        if best and max(s for s, _ in best) >= 6:
-            break      # 已经找到很像梗的结果，不用再试了
+    clues = []
 
-    if not best:
-        return "「%s」没查到靠谱的解释，可能太小众" % term
+    # 1) 360 搜「什么意思」，摘要通常直接就是解释
+    clues.extend(_explain_from_360(term))
 
-    best.sort(key=lambda x: -x[0])
+    # 2) B 站视频标题+简介，补出处
+    try:
+        for line in _search_bilibili("%s 什么梗" % term, 3):
+            if term in line or "梗" in line:
+                clues.append(line)
+    except Exception:
+        pass
+
+    # 3) 最后再用必应兜底
+    if not clues:
+        try:
+            clues.extend(_search_bing("%s 什么梗 什么意思" % term, 3))
+        except Exception:
+            pass
+
+    if not clues:
+        return "「%s」没查到，可能太小众" % term
+
     seen, out = set(), []
-    for _, line in best:
-        head = line[:30]
-        if head in seen:
+    for c in clues:
+        key = c[:24]
+        if key in seen:
             continue
-        seen.add(head)
-        out.append(line)
-        if len(out) >= 3:
+        seen.add(key)
+        out.append(c)
+        if len(out) >= 4:
             break
     return "\n".join(out)
 

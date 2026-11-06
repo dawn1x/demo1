@@ -94,12 +94,27 @@ def _try(query, tries):
     return None, None
 
 
+# 这些词出现在查询里会搜到奇怪的东西（搜自己名字会出真鱼照片）
+BAD_WORDS = ("大肥鱼", "肥鱼", "qwertyuio")
+
+
+def clean_query(query):
+    """清理模型给的查询词：去掉自己的名字、限量两个词。"""
+    q = (query or "").strip()
+    for w in BAD_WORDS:
+        q = q.replace(w, " ")
+    tokens = [t for t in q.replace(",", " ").replace("、", " ").split() if t]
+    if not tokens:
+        return "无语"
+    return " ".join(tokens[:2])
+
+
 def get_meme(query, tries=4):
     """现搜一张表情包。返回 (图片字节, 来源URL)；搜不到返回 (None, None)。
 
     查询词太长往往搜不到（"无语 翻白眼 嘲讽"），所以逐级退化成更短的词再试。
     """
-    query = (query or "").strip()
+    query = clean_query(query)
     if not query:
         return None, None
 
@@ -110,7 +125,7 @@ def get_meme(query, tries=4):
         cands.append(" ".join(words[:2]))
     if len(words) > 1:
         cands.append(words[0])
-    cands.append("无语")
+    cands.append(random.choice(["无语", "笑死", "就这", "绷不住了"]))
 
     seen = set()
     for cand in cands:
