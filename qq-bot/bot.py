@@ -186,6 +186,32 @@ MEME_TOOL = [
     },
 ]
 
+PACE_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "pace",
+            "description": "决定你回复前「想多久」。像真人一样：随口一句就选『快』，"
+                           "要查东西、要认真接话选『正常』，被问住了或者不想理选『慢』，"
+                           "对方说了很重的话/你需要斟酌选『久』。不调就用默认速度。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "level": {
+                        "type": "string",
+                        "enum": ["快", "正常", "慢", "久"],
+                        "description": "快=马上回；正常=想一下；慢=犹豫；久=明显停顿",
+                    },
+                    "why": {"type": "string", "description": "为什么想这么久（可不填）"},
+                },
+                "required": ["level"],
+            },
+        },
+    },
+]
+
+PACE_SECONDS = {"快": (1.0, 3.0), "正常": (3.0, 7.0), "慢": (7.0, 14.0), "久": (14.0, 25.0)}
+
 EXTRA_TOOLS = [
     {
         "type": "function",
@@ -288,7 +314,7 @@ FUN_TOOLS = [
     },
 ]
 
-ALL_TOOLS = TOOL_SCHEMAS + MEMORY_TOOLS + MEME_TOOL + FUN_TOOLS + EXTRA_TOOLS
+ALL_TOOLS = TOOL_SCHEMAS + MEMORY_TOOLS + MEME_TOOL + FUN_TOOLS + EXTRA_TOOLS + PACE_TOOLS
 
 
 async def call_api(action, params, timeout=20):
@@ -364,6 +390,13 @@ async def run_any_tool(name, args, images=None):
         return memory.recall(args.get("nick", ""))
     if name == "search_memory":
         return memory.search_memory(args.get("keyword", ""))
+    if name == "pace":
+        level = args.get("level") or "正常"
+        if level not in PACE_SECONDS:
+            level = "正常"
+        state_holder["pace"] = level
+        return "（你会先停 %s，再开口）" % ("一会儿" if level != "快" else "一下")
+
     if name == "schedule_task":
         try:
             minutes = max(5, int(args.get("minutes", 60)))
@@ -1132,8 +1165,15 @@ def human_delay(text):
 
 
 async def send_like_human(ws, group_id, text, images=None, at_user=None, reply_to=None):
-    """先愣一会儿再发；长句拆成两段；偶尔 @ 一下。"""
-    await asyncio.sleep(human_delay(text))
+    """模型自己决定想多久；没决定就按字数估。"""
+    level = state_holder.pop("pace", None)
+    if level in PACE_SECONDS:
+        lo, hi = PACE_SECONDS[level]
+        delay = random.uniform(lo, hi)
+        log("  [节奏] 模型选了「%s」→ 等 %.1f 秒" % (level, delay))
+    else:
+        delay = human_delay(text)
+    await asyncio.sleep(delay)
 
     use_at = bool(at_user) and random.random() < AT_CHANCE
     parts = split_message(text) if (SPLIT_REPLY and not images) else [text]
