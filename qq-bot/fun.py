@@ -120,6 +120,41 @@ def auto_affinity(nick, uid, text):
     return None
 
 
+# ---------------------------------------------------------------- 群聊关系
+def record_interaction(prev_uid, uid):
+    """记一条「A 说完 B 接着说」的关系。"""
+    if not prev_uid or not uid or str(prev_uid) == str(uid):
+        return
+    with _lock:
+        data = load()
+        rel = data.setdefault("relations", {})
+        key = "%s->%s" % (prev_uid, uid)
+        rel[key] = rel.get(key, 0) + 1
+        save(data)
+
+
+def relations_text(top=3):
+    """把关系数据翻译成人话。"""
+    with _lock:
+        data = load()
+        rel = dict(data.get("relations") or {})
+        stats = dict(data.get("stats") or {})
+
+    if not rel:
+        return None
+
+    def nick_of(uid):
+        st = stats.get(str(uid)) or {}
+        return st.get("nick") or str(uid)
+
+    pairs = sorted(rel.items(), key=lambda x: -x[1])[:top]
+    lines = []
+    for key, cnt in pairs:
+        a, b = key.split("->")
+        lines.append("%s → %s（%d 次）" % (nick_of(a), nick_of(b), cnt))
+    return lines
+
+
 # ---------------------------------------------------------------- 群友档案
 def record_message(uid, nick, has_image=False):
     if uid is None:
@@ -187,6 +222,10 @@ def weekly_report():
             lines.append("· 我最待见：%s（好感 %d）" % (best["nick"], best["score"]))
         if worst.get("score", 0) < 0:
             lines.append("· 我最烦：%s（好感 %d）" % (worst["nick"], worst["score"]))
+
+    rel = relations_text(2)
+    if rel:
+        lines.append("· 最常接话：" + "；".join(rel))
 
     lines.append("—— 就这些，散了。")
     return "\n".join(lines)

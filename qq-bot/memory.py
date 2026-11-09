@@ -126,6 +126,39 @@ def grudge_count(nick, user_id=None):
     return sum(1 for i in u.get("items", []) if i.get("kind") == "grudge")
 
 
+def search_memory(keyword, limit=5):
+    """按内容模糊查记忆（不要求记得昵称）。"""
+    keyword = (keyword or "").strip()
+    if not keyword:
+        return "没给关键词"
+
+    terms = [t for t in keyword.replace("，", " ").replace(",", " ").split() if t]
+    if not terms:
+        terms = [keyword]
+
+    with _lock:
+        data = load()
+        users = data.get("users", {})
+
+    hits = []
+    for uid, item in users.items():
+        nick = item.get("nick") or uid
+        for rec in item.get("items", []):
+            text = rec.get("what") or ""
+            score = sum(1 for t in terms if t in text)
+            if score:
+                hits.append((score, nick, KINDS.get(rec.get("kind"), "记录"), text))
+    hits.sort(key=lambda x: -x[0])
+
+    if not hits:
+        return "没有跟「%s」有关的记录" % keyword
+
+    out = []
+    for _, nick, kind, text in hits[:limit]:
+        out.append("%s（%s）：%s" % (nick, kind, text))
+    return "\n".join(out)
+
+
 def stats():
     with _lock:
         data = load()

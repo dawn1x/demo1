@@ -264,6 +264,29 @@ def lookup_slang(term):
     return "\n".join(out)
 
 
+# ---------------------------------------------------------------- 核实
+def fact_check(claim):
+    """对一个说法做快速核实：搜两次，把证据摆出来。"""
+    claim = (claim or "").strip()
+    if not claim:
+        return "没给要核实的说法"
+
+    lines = []
+    for q in (claim, claim + " 真的吗"):
+        try:
+            res = search_web(q, limit=2)
+        except Exception:
+            continue
+        if res and "没搜到" not in res:
+            lines.append(res)
+        if len(lines) >= 2:
+            break
+
+    if not lines:
+        return "查不到「%s」的准信" % claim
+    return "\n".join(lines)[:900]
+
+
 # ---------------------------------------------------------------- 对外声明
 # OpenAI / DeepSeek 的 function calling 格式
 TOOL_SCHEMAS = [
@@ -298,6 +321,20 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "fact_check",
+            "description": "核实一个说法是真的还是假的。被质疑、或者不确定自己说得对不对时用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "claim": {"type": "string", "description": "要核实的说法"},
+                },
+                "required": ["claim"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "lookup_slang",
             "description": "查网络梗、黑话、缩写是什么意思、出自哪里。群友用了个你不懂的词时用。",
             "parameters": {
@@ -315,6 +352,7 @@ TOOL_FUNCS = {
     "get_weather": get_weather,
     "search_web": search_web,
     "lookup_slang": lookup_slang,
+    "fact_check": fact_check,
 }
 
 

@@ -181,6 +181,37 @@ MEME_TOOL = [
     },
 ]
 
+EXTRA_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_memory",
+            "description": "按内容模糊查记忆，不用记得对方名字。比如「谁老要片」「谁说过要健身」。",
+            "parameters": {
+                "type": "object",
+                "properties": {"keyword": {"type": "string", "description": "关键词"}},
+                "required": ["keyword"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "schedule_task",
+            "description": "安排一件以后要做的事，到点自己发消息。比如「明天提醒他」"
+                           "「比赛结束后点评」。别乱用，只在明确有时效要求时用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "minutes": {"type": "integer", "description": "多少分钟后执行，最少 5"},
+                    "what": {"type": "string", "description": "到点要说什么/做什么"},
+                },
+                "required": ["minutes", "what"],
+            },
+        },
+    },
+]
+
 FUN_TOOLS = [
     {
         "type": "function",
@@ -252,7 +283,7 @@ FUN_TOOLS = [
     },
 ]
 
-ALL_TOOLS = TOOL_SCHEMAS + MEMORY_TOOLS + MEME_TOOL + FUN_TOOLS
+ALL_TOOLS = TOOL_SCHEMAS + MEMORY_TOOLS + MEME_TOOL + FUN_TOOLS + EXTRA_TOOLS
 
 
 async def call_api(action, params, timeout=20):
@@ -315,6 +346,10 @@ async def save_to_favorites(data):
     return "存档失败：%s" % (resp.get("message") or resp.get("wording") or "")
 
 
+state_holder = {}
+_current_group = {}
+
+
 async def run_any_tool(name, args, images=None):
     """执行工具。images 用来收集本次要发的表情包图片。"""
     if name == "remember":
@@ -322,6 +357,21 @@ async def run_any_tool(name, args, images=None):
                                args.get("kind", "fact"))
     if name == "recall":
         return memory.recall(args.get("nick", ""))
+    if name == "search_memory":
+        return memory.search_memory(args.get("keyword", ""))
+    if name == "schedule_task":
+        try:
+            minutes = max(5, int(args.get("minutes", 60)))
+        except (TypeError, ValueError):
+            minutes = 60
+        what = (args.get("what") or "").strip()
+        if not what:
+            return "没说要做啥"
+        state = state_holder.get("state")
+        if state is not None:
+            state["tasks"].append({"at": time.time() + minutes * 60, "what": what})
+            save_tasks(state)
+        return "记下了，%d 分钟后办：%s" % (minutes, what)
 
     if name == "affinity":
         try:
@@ -370,6 +420,9 @@ def _build_messages(history, text, nickname, user_id=None, image_urls=None):
     if prof:
         system += "\n\n你对「%s」的印象：%s" % (nickname, prof)
     system += "\n" + fun.affinity_prompt(nickname, user_id)
+    topic = (state_holder.get("topic_summary") or {}).get(_current_group.get("id"))
+    if topic:
+        system += "\n群里当前在聊：%s" % topic
 
     messages = [{"role": "system", "content": system}]
     for item in history:
@@ -746,6 +799,87 @@ async def make_topic(state, group_id):
     return nick, target, text[:60]
 
 
+TASK_PATH = os.path.join(HERE, "data", "tasks.json")
+TOPIC_STATE_PATH = os.path.join(HERE, "data", "topic_state.json")
+
+
+def load_tasks():
+    try:
+        with open(TASK_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def save_tasks(state):
+    try:
+        os.makedirs(os.path.dirname(TASK_PATH), exist_ok=True)
+        with open(TASK_PATH, "w", encoding="utf-8") as f:
+            json.dump(state.get("tasks", []), f, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def load_topic_state():
+    try:
+        with open(TOPIC_STATE_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_topic_state(state):
+    try:
+        os.makedirs(os.path.dirname(TOPIC_STATE_PATH), exist_ok=True)
+        with open(TOPIC_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(state.get("topic_summary", {}), f, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+async def summarize_topic(state, group_id):
+    """把最近聊天压成一句话话题，回复时带上，避免答非所问。"""
+    history = list(state["history"].get(group_id) or [])[-20:]
+    if len(history) < 6:
+        return
+    lines = "\n".join("%s: %s" % (h["nick"], h["text"]) for h in history)
+    try:
+        resp = await _client().chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "system", "content": "把下面这段群聊概括成一句话主题，20字以内，只输出主题。"},
+                      {"role": "user", "content": lines}],
+            temperature=0.3, max_tokens=40)
+        summary = (resp.choices[0].message.content or "").strip()[:60]
+    except Exception:
+        return
+    if summary:
+        state.setdefault("topic_summary", {})[group_id] = summary
+        save_topic_state(state)
+        log("[话题] %s" % summary)
+
+
+async def task_loop(state):
+    """每分钟看一眼有没有到点的定时任务。"""
+    while True:
+        await asyncio.sleep(60)
+        now = time.time()
+        due = [t for t in state.get("tasks", []) if t.get("at", 0) <= now]
+        if not due:
+            continue
+        state["tasks"] = [t for t in state.get("tasks", []) if t.get("at", 0) > now]
+        save_tasks(state)
+        gid = state.get("topic_group")
+        if not gid or not state.get("ws"):
+            continue
+        for t in due:
+            try:
+                reply, imgs = await ask_model([], "（到点提醒）%s" % t["what"], BOT_NICK, None)
+                await send_like_human(state["ws"], gid, reply or t["what"], imgs)
+                log("[定时任务] %s" % t["what"])
+            except Exception as exc:
+                log("[定时任务] 失败:", str(exc)[:60])
+
+
 async def report_loop(state):
     """每周一上午发一次群友档案。"""
     while True:
@@ -1044,11 +1178,24 @@ async def handle_event(ws, event, state):
     if not text and not images and not faces:
         return
 
+    state_holder["state"] = state
+    _current_group["id"] = group_id
+
     history = state["history"].setdefault(group_id, deque(maxlen=MAX_HISTORY))
     history.append({"nick": nickname, "text": display, "uid": user_id})
     state["msg_times"].setdefault(group_id, []).append(time.time())
     state["last_msg_time"] = time.time()
     save_history(state)
+
+    # 记录「谁接谁的话」
+    prev_uid = state.get("prev_uid")
+    fun.record_interaction(prev_uid, user_id)
+    state["prev_uid"] = user_id
+
+    # 每 20 条更新一次话题摘要
+    state["msg_count"] = state.get("msg_count", 0) + 1
+    if state["msg_count"] % 20 == 0:
+        asyncio.create_task(summarize_topic(state, group_id))
     record_speaker(group_id, user_id, nickname)
     fun.record_message(user_id, nickname, has_image=bool(images))
     change = fun.auto_affinity(nickname, user_id, display)
@@ -1191,7 +1338,7 @@ async def run_bot():
              "auto_times": {}, "msg_times": {},
              "topic_today": 0, "topic_day": "", "topic_last_user": {},
              "topic_group": None, "self_id": None,
-             "last_reply_user": {}}
+             "last_reply_user": {}, "tasks": load_tasks(), "topic_summary": {}}
     while True:
         try:
             print("连接", WS_URL, "...")
@@ -1239,6 +1386,12 @@ async def run_bot():
                     state["health_task"] = asyncio.create_task(health_loop(state))
                 if not state.get("report_task"):
                     state["report_task"] = asyncio.create_task(report_loop(state))
+                if not state.get("task_loop"):
+                    state["task_loop"] = asyncio.create_task(task_loop(state))
+                if not state.get("topic_summary"):
+                    state["topic_summary"] = load_topic_state()
+                if not state.get("self_id"):
+                    pass
                 # 不用 async for：加看门狗，90 秒收不到任何东西就认为连接假死
                 while True:
                     try:
