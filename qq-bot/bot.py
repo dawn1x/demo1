@@ -69,7 +69,12 @@ USE_TOOLS = os.getenv("USE_TOOLS", "1") == "1"
 MAX_TOOL_STEPS = 3
 
 # 像人的行为参数
-REPLY_DELAY_MIN = float(os.getenv("REPLY_DELAY_MIN", "1.2"))   # 打字前先愣一会儿
+THINK_MIN = float(os.getenv("THINK_MIN", "2.5"))       # 看到消息后先愣多久
+THINK_MAX = float(os.getenv("THINK_MAX", "6.5"))
+TYPE_SPEED_MIN = float(os.getenv("TYPE_SPEED_MIN", "0.12"))  # 每个字打多久
+TYPE_SPEED_MAX = float(os.getenv("TYPE_SPEED_MAX", "0.30"))
+DISTRACT_CHANCE = float(os.getenv("DISTRACT_CHANCE", "0.15"))  # 偶尔走神，多停一会儿
+REPLY_DELAY_MIN = float(os.getenv("REPLY_DELAY_MIN", "1.2"))
 REPLY_DELAY_MAX = float(os.getenv("REPLY_DELAY_MAX", "5.0"))
 SPLIT_REPLY = os.getenv("SPLIT_REPLY", "1") == "1"             # 偶尔分两条发
 AT_CHANCE = float(os.getenv("AT_CHANCE", "0.3"))               # 回复时顺带 @ 对方的概率
@@ -1116,9 +1121,19 @@ def split_message(text, limit=2):
     return [text]
 
 
+def human_delay(text):
+    """人打字要多久：先思考，再按字数打字，偶尔走神。"""
+    delay = random.uniform(THINK_MIN, THINK_MAX)
+    per_char = random.uniform(TYPE_SPEED_MIN, TYPE_SPEED_MAX)
+    delay += len(text or "") * per_char
+    if random.random() < DISTRACT_CHANCE:
+        delay += random.uniform(3, 9)      # 走神
+    return min(delay, 25)
+
+
 async def send_like_human(ws, group_id, text, images=None, at_user=None, reply_to=None):
     """先愣一会儿再发；长句拆成两段；偶尔 @ 一下。"""
-    await asyncio.sleep(random.uniform(REPLY_DELAY_MIN, REPLY_DELAY_MAX))
+    await asyncio.sleep(human_delay(text))
 
     use_at = bool(at_user) and random.random() < AT_CHANCE
     parts = split_message(text) if (SPLIT_REPLY and not images) else [text]
@@ -1131,7 +1146,7 @@ async def send_like_human(ws, group_id, text, images=None, at_user=None, reply_t
                          at_user=at_user if (i == 0 and use_at) else None,
                          reply_to=reply_to if i == 0 else None)
         if i < len(parts) - 1:
-            await asyncio.sleep(random.uniform(0.6, 1.8))
+            await asyncio.sleep(random.uniform(1.2, 3.0))
 
 
 async def send_group(ws, group_id, text, images=None, at_user=None, reply_to=None):
